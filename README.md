@@ -1,60 +1,48 @@
 # JARVIS MINI V2 🤖🧠
 
-> **An affordable, autonomous AI assistant and robot car bridging physical microcontroller hardware with a powerful local AI brain.**
+> **An affordable, fully local, autonomous AI assistant and robot car.**
 
-## 📖 Introduction
-JARVIS MINI is an advanced, low-cost autonomous AI assistant and robot car. It bridges physical microcontroller hardware with a powerful local desktop AI brain via Wi-Fi. By combining real-time computer vision (YOLO), conversational speech processing (Browser Web Speech API & Kokoro TTS), and edge hardware control (ESP32 NodeMCU/ESP8266 and ESP32-CAM), JARVIS can navigate physical spaces, recognize objects, and communicate naturally with users through an interactive web-based FastAPI dashboard.
+## 📖 What is JARVIS MINI?
+JARVIS MINI bridges physical hardware with a powerful local desktop AI brain via Wi-Fi. By combining real-time computer vision, conversational speech processing, and edge hardware control, JARVIS can navigate physical spaces, recognize objects, and communicate naturally with users through an interactive web dashboard. 
 
-## ✨ Features
-- **Conversational AI:** Local voice processing utilizing Qwen 2.5 (Ollama) or Gemini models.
-- **Computer Vision:** Real-time object detection and context injection via ESP32-CAM and YOLO.
-- **Autonomous Movement:** DC motor control and obstacle avoidance (HC-SR04) via L298N and PCF8574 I/O Expander.
-- **Interactive Face:** ST7789 TFT display for dynamic visual feedback and status monitoring.
-- **Local Telemetry & Memory:** SQLite database integration for logging chat history and vision state.
-- **Dual Power Options:** Supports both standard USB Power Banks and upgraded 2x 18650 Battery Shield V8 modules.
+**Privacy First:** All AI processing (Vision, LLM, Speech-to-Text, and Text-to-Speech) happens 100% locally on your machine. No cloud APIs are required!
+
+---
+
+## 🧠 Local AI Models Explained
+Because AI models are massive files, they are **not** included in this repository to keep the download fast. You will need to download them locally before running the robot:
+
+1. **The Brain (LLM):** Powered by Ollama. 
+   * **Setup:** Install [Ollama](https://ollama.com/) and run `ollama run qwen2.5:3b` in your terminal to download the local conversation model.
+2. **The Eyes (Vision):** Powered by YOLO (Ultralytics).
+   * **Setup:** The Python script will automatically download the lightweight `yolov8n.pt` or `yolo11n.pt` model on its first run, or you can place them in the root directory.
+3. **The Voice (TTS):** Powered by Kokoro ONNX.
+   * **Setup:** Download `kokoro-v1.0.onnx` and `voices-v1.0.bin` and place them in the root directory.
+4. **The Ears (STT):** Powered by Vosk.
+   * **Setup:** Download the [Vosk English Model](https://alphacephei.com/vosk/models) (e.g., `vosk-model-small-en-us`) and extract it into the `resources/voices/` folder.
+
+---
 
 ## 🛠️ Hardware Stack
-- **Microcontrollers:** ESP8266 NodeMCU & ESP32-CAM (OV2640)
-- **Motor Control:** L298N Motor Driver, 2WD Smart Car Chassis
-- **Sensors & Expansion:** HC-SR04 Ultrasonic Sensor, PCF8574 I/O Expander
-- **Display & Audio:** ST7789 TFT Display, INMP441 Mic, MAX98357A Amplifier, 8Ω Speaker
-- **Power:** 2x 18650 Battery Shield V8 Module (or USB Power Bank)
+* **Microcontrollers:** ESP8266 NodeMCU (Main Core) & ESP32-CAM (Vision Node)
+* **Movement:** L298N Motor Driver, 2WD Smart Car Chassis
+* **Sensors:** HC-SR04 Ultrasonic Sensor, PCF8574 I/O Expander
+* **Face & Audio:** ST7789 TFT Display, INMP441 Microphone, MAX98357A Amplifier, 8Ω Speaker
+* **Power:** 2x 18650 Battery Shield V8 Module (Recommended) OR Standard 5V USB Power Bank
 
-## 💻 Software Stack
-- **Backend:** Python 3.10+, FastAPI, SQLite
-- **AI & Vision:** Ultralytics YOLOv8, Ollama (Qwen2.5:3b), Kokoro ONNX TTS
-- **Firmware:** Arduino IDE, C/C++ 
+---
 
 ## 🚀 Getting Started
 
-### 1. Hardware Setup
-Follow the complete system wiring guide to construct the physical robot. Main phases include:
-1. Power Distribution Setup (+5V/GND Rails)
-2. Control & Expansion Core (PCF8574)
-3. Movement Subsystem (L298N)
-4. Obstacle Detection (HC-SR04)
-5. Robot Face Display (ST7789)
-6. Audio Subsystem (MAX98357A)
-
-### 2. Software Installation
+### 1. Software Installation
 ```bash
 # Clone the repository
-git clone https://github.com/YOUR_USERNAME/JARVIS_MINI_V2.git
-cd JARVIS_MINI_V2
+git clone [https://github.com/meetbhavsar-31/Jarvis-mini-V1-AI-Robot.git](https://github.com/meetbhavsar-31/Jarvis-mini-V1-AI-Robot.git)
+cd Jarvis-mini-V1-AI-Robot
 
 # Create and activate a virtual environment
 python -m venv venv
-source venv/bin/activate  # On Windows use `venv\Scripts\activate`
+source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # Install dependencies
 pip install -r requirements.txt
-```
-
-### 3. Running the System
-1. Flash the `.ino` firmware to your ESP8266 and ESP32-CAM.
-2. Start the local LLM server (e.g., `ollama run qwen2.5:3b`).
-3. Launch the FastAPI backend:
-   ```bash
-   python -m uvicorn src.main:app --reload
-   ```
-4. Access the web dashboard at `http://localhost:8000`.
