@@ -1,0 +1,12 @@
+tts:
+  engine: "piper"
+  model_path: "../resources/voices/en_US-lessac-medium.onnx"
+  output_file: "../memory/speech.wav"
+  udp_tx_port: 5006
+  sample_rate: 22050
+
+stt:
+  engine: "vosk"
+  model_path: "../resources/voices/vosk-stt-model"
+  udp_rx_port: 5005
+  sample_rate: 16000

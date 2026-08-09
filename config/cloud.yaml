@@ -1,0 +1,8 @@
+local_llm:
+  model_name: "qwen2.5:3b"
+  host: "http://localhost:11434"
+
+cloud_llm:
+  enabled: false          # Change true to false
+  model_name: "gemini-2.5-flash"
+  api_key: ""

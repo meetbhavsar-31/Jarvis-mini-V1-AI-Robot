@@ -1,0 +1,9 @@
+vision:
+  # Ensure your exact active STA IP is set here
+  stream_url: "http://192.168.29.175/stream"
+  
+  model: "yolo11n.pt"
+  
+  # Lower confidence threshold so smaller or low-res objects are detected
+  confidence_threshold: 0.18
+

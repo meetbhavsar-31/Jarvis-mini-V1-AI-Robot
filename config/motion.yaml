@@ -1,0 +1,4 @@
+odometry:
+  cm_per_tick: 1.021
+  default_speed: 200
+  emergency_stop_distance_cm: 12.0

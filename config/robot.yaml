@@ -1,0 +1,6 @@
+hardware:
+  # The Python Motion Controller will now automatically resolve this name to the correct IP
+  robot_ip: "http://jarvis.local" 
+  
+motion:
+  default_speed: 255

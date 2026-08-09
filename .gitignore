@@ -1,0 +1,22 @@
+# Virtual Environments
+venv/
+.venv/
+env/
+
+# Python Cache
+__pycache__/
+*.pyc
+
+# Large AI Models & Media
+*.pt
+*.onnx
+*.bin
+resources/voices/
+
+# Logs & Databases
+*.log
+*.db
+memory/logs/
+
+# Secrets
+.env

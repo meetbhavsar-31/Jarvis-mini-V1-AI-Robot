@@ -1,0 +1,19 @@
+customtkinter==5.2.2
+piper-tts==1.2.0
+vosk==0.3.45
+sounddevice==0.4.6
+numpy==1.26.4
+opencv-python==4.9.0.80
+ultralytics==8.1.24
+pyyaml==6.0.1
+requests==2.31.0
+google-genai==0.3.0
+
+- #Ensute Your Virtual Environment is Still Active 
+#.\venv\Scripts\activate 
+
+- #(In config/camera.yaml)
+# vision:
+  # stream_url: "http://192.168.1.55:81/stream"  # Replace with your ESP32-CAM IP
+  # model: "yolov8n.pt"
+  # confidence_threshold: 0.5
