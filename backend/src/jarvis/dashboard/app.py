@@ -74,15 +74,42 @@ def api_eyes(req: EyeColorRequest):
     return {"status": "success", "rgb": [r, g, b], "result": result}
 
 def process_voice_and_chat(user_message: str):
-    """Processes LLM response and speaks sentence-by-sentence to eliminate audio lag."""
+    """
+    Processes motion triggers, LLM text generation, and speaks sentence-by-sentence.
+    """
     try:
+        user_intent = user_message.lower()
+
+        # ==================================================================
+        # 1. MOVEMENT INTENT DETECTION (Automated Motor Controls)
+        # ==================================================================
+        if "explore" in user_intent or "forward" in user_intent:
+            logger.info("Chat Trigger: Executing forward movement...")
+            threading.Thread(target=motion.execute_movement, args=("forward", 2.0)).start()
+        elif "backward" in user_intent or "back" in user_intent:
+            logger.info("Chat Trigger: Executing backward movement...")
+            threading.Thread(target=motion.execute_movement, args=("backward", 2.0)).start()
+        elif "left" in user_intent:
+            logger.info("Chat Trigger: Turning left...")
+            threading.Thread(target=motion.execute_movement, args=("left", 1.0)).start()
+        elif "right" in user_intent:
+            logger.info("Chat Trigger: Turning right...")
+            threading.Thread(target=motion.execute_movement, args=("right", 1.0)).start()
+        elif "stop" in user_intent:
+            logger.info("Chat Trigger: Stopping motors...")
+            threading.Thread(target=motion.execute_movement, args=("stop", 0.0)).start()
+
+        # ==================================================================
+        # 2. LLM THINKING & VOICE OUTPUT
+        # ==================================================================
         response_text = brain.think(user_message)
         sentences = re.split(r'(?<=[.!?])\s+', response_text)
         for sentence in sentences:
             if sentence.strip():
                 tts.speak(sentence.strip())
+
     except Exception as e:
-        logger.error(f"Error processing AI voice response: {e}")
+        logger.error(f"Error processing AI voice and motion response: {e}")
 
 @app.post("/api/chat")
 def api_chat(req: ChatRequest):
