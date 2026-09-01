@@ -3,7 +3,7 @@
 #include <WebServer.h>
 #include "img_converters.h" 
 #include <WiFiManager.h>
-#include <ESPmDNS.h> // REQUIRED: mDNS library for ESP32
+#include <ESPmDNS.h> 
 
 // ==========================================
 // AI-THINKER ESP32-CAM PIN CONFIGURATION
@@ -28,7 +28,7 @@
 WebServer server(80);
 
 // ==========================================
-// STREAM HANDLER 
+// STREAM HANDLER (Software JPEG Conversion)
 // ==========================================
 void handle_jpg_stream() {
   camera_fb_t * fb = NULL;
@@ -47,8 +47,9 @@ void handle_jpg_stream() {
     size_t _jpg_buf_len = 0;
     uint8_t * _jpg_buf = NULL;
     
+    // Software conversion from RGB565 to JPEG
     if(fb->format != PIXFORMAT_JPEG){
-      bool jpeg_converted = frame2jpg(fb, 40, &_jpg_buf, &_jpg_buf_len);
+      bool jpeg_converted = frame2jpg(fb, 80, &_jpg_buf, &_jpg_buf_len);
       esp_camera_fb_return(fb); 
       fb = NULL;
       if(!jpeg_converted){
@@ -80,7 +81,7 @@ void setup() {
   Serial.begin(115200);
   delay(100);
   
-  // 1. Initialize Camera
+  // 1. Initialize Camera Configuration
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer = LEDC_TIMER_0;
@@ -100,7 +101,9 @@ void setup() {
   config.pin_sccb_scl = SIOC_GPIO_NUM;
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
-  config.xclk_freq_hz = 20000000;
+  config.xclk_freq_hz = 10000000; // Lowered to 10MHz for maximum sensor stability
+  
+  // Set format to RGB565 to bypass hardware JPEG limitations
   config.pixel_format = PIXFORMAT_RGB565; 
   
   if(psramFound()){
@@ -144,5 +147,4 @@ void setup() {
 
 void loop() {
   server.handleClient();
-  // Note: ESP32 mDNS handles updates automatically in the background, no MDNS.update() needed here.
 }

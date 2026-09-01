@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %} — Camera View{% endblock %}
+{% block content %}
+
+<div class="page-header">
+  <h2>Camera View</h2>
+  <p class="page-subtitle">Live high-resolution feed from ESP32-CAM</p>
+</div>
+
+<section class="card card-camera-full">
+  <div class="camera-full" id="cameraFull" style="position: relative; overflow: hidden; border-radius: 8px; height: 480px; background: #000;">
+    <img src="/video_feed" alt="Live Stream" style="width: 100%; height: 100%; object-fit: cover; position: absolute; top: 0; left: 0; z-index: 0;">
+  </div>
+
+  <div class="camera-toolbar" style="margin-top: 15px; display: flex; gap: 10px; align-items: center;">
+    <button class="btn btn-secondary" id="takeScreenshotBtn" onclick="fetch('/api/control', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({command: 'screenshot'})})">Take Screenshot</button>
+    <button class="btn btn-secondary" id="cameraPageRecordBtn" style="transition: 0.3s;" onclick="toggleCameraPageRecord()">Record Video</button>
+    <span class="camera-status" id="cameraStreamStatus" style="color: #35e07a; font-weight: bold; margin-left: auto;">Stream status: Live</span>
+  </div>
+</section>
+
+<script>
+  let camPageRecording = false;
+  function toggleCameraPageRecord() {
+      camPageRecording = !camPageRecording;
+      const btn = document.getElementById('cameraPageRecordBtn');
+      if (camPageRecording) {
+          btn.style.backgroundColor = '#da3633';
+          btn.style.borderColor = '#da3633';
+          btn.style.color = 'white';
+          btn.innerText = '⏹ Stop Record';
+          fetch('/api/control', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({command: 'record_start'}) });
+      } else {
+          btn.style.backgroundColor = '';
+          btn.style.borderColor = '';
+          btn.style.color = '';
+          btn.innerText = 'Record Video';
+          fetch('/api/control', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({command: 'record_stop'}) });
+      }
+  }
+</script>
+
+{% endblock %}

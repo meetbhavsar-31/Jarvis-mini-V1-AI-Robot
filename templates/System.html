@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %} — System{% endblock %}
+{% block content %}
+
+<div class="page-header">
+  <h2>System Overview</h2>
+  <p class="page-subtitle">Live resource usage, pulled from /api/system-stats</p>
+</div>
+
+<div class="grid-system">
+
+  <section class="card stat-card">
+    <div class="stat-label">CPU Usage</div>
+    <div class="stat-value" id="statCpu">--%</div>
+    <div class="stat-bar"><div class="stat-bar-fill" id="statCpuBar"></div></div>
+  </section>
+
+  <section class="card stat-card">
+    <div class="stat-label">Memory</div>
+    <div class="stat-value" id="statMemory">--%</div>
+    <div class="stat-bar"><div class="stat-bar-fill" id="statMemoryBar"></div></div>
+  </section>
+
+  <section class="card stat-card">
+    <div class="stat-label">Network</div>
+    <div class="stat-value" id="statNetwork">--</div>
+    <div class="stat-sub" id="statNetworkLatency">Latency: -- ms</div>
+  </section>
+
+  <section class="card stat-card">
+    <div class="stat-label">Storage</div>
+    <div class="stat-value" id="statStorage">--%</div>
+    <div class="stat-bar"><div class="stat-bar-fill" id="statStorageBar"></div></div>
+  </section>
+
+</div>
+
+{% endblock %}

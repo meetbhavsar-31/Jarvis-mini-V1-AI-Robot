@@ -1,6 +1,6 @@
 vision:
   # Ensure your exact active STA IP is set here
-  stream_url: "http://10.67.32.166/stream"
+  stream_url: "http://192.168.29.175/stream"
   
   model: "yolo11n.pt"
   

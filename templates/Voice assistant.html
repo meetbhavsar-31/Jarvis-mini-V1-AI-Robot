@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %} — Voice Assistant{% endblock %}
+{% block content %}
+
+<div class="page-header">
+  <h2>Voice Assistant</h2>
+  <p class="page-subtitle">Talk to JARVIS — voice recognition + AI response</p>
+</div>
+
+<section class="card card-voice">
+
+  <div class="voice-mic-area">
+    <button id="micButton" class="mic-button">
+      <span class="mic-icon">&#127908;</span>
+    </button>
+    <div class="mic-state" id="micState">Tap to speak</div>
+
+    <!-- Waveform visualization placeholder -->
+    <div class="waveform" id="waveform">
+      <span></span><span></span><span></span><span></span><span></span>
+      <span></span><span></span><span></span><span></span>
+    </div>
+  </div>
+
+  <div class="quick-command-chips">
+    <button class="chip" data-command-text="Hey Jarvis">Hey Jarvis</button>
+    <button class="chip" data-command-text="What do you see?">What do you see?</button>
+    <button class="chip" data-command-text="Go Forward">Go Forward</button>
+    <button class="chip" data-command-text="Status Report">Status Report</button>
+  </div>
+
+  <div class="response-log">
+    <div class="card-header"><h3>Response Log</h3></div>
+    <ul class="response-log-list" id="responseLogList">
+      <li class="response-empty">No commands yet — try a quick command above.</li>
+    </ul>
+  </div>
+
+</section>
+
+{% endblock %}

@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+{% block title %} — Security & DVR Archives{% endblock %}
+{% block content %}
+
+<div class="page-header" style="margin-bottom: 20px;">
+  <h2>Security & DVR Archives</h2>
+  <p class="page-subtitle">Review Cloudinary security snapshots and local DVR recordings.</p>
+</div>
+
+<div class="grid-dashboard-2col" style="display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 20px; align-items: start;">
+  
+  <!-- LEFT COLUMN: LOCAL VIDEO DVR -->
+  <section class="card card-video-archive" style="display: flex; flex-direction: column; gap: 16px;">
+    <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
+      <h3>Local Video DVR</h3>
+      <button class="btn btn-secondary" onclick="loadVideoArchive()" style="padding: 4px 12px; font-size: 12px;">Refresh List</button>
+    </div>
+    
+    <!-- Video Player Container -->
+    <div style="width: 100%; height: 260px; background: #05070d; border: 1px solid #30363d; border-radius: 8px; overflow: hidden; display: flex; align-items: center; justify-content: center;">
+      <video id="dvrPlayer" controls style="width: 100%; height: 100%; object-fit: contain; display: none;">
+        Your browser does not support the video tag.
+      </video>
+      <div id="dvrPlaceholder" style="padding: 20px; text-align: center; color: #8fa7c4;">
+        <span style="font-size: 32px; display: block; margin-bottom: 8px;">🎬</span>
+        Select a recording from the archive list below to play.
+      </div>
+    </div>
+
+    <!-- Video List Container -->
+    <div>
+      <h4 style="margin: 0 0 10px 0; color: #58a6ff; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px;">Saved Recordings</h4>
+      <ul id="videoList" style="list-style: none; padding: 0; margin: 0; max-height: 240px; overflow-y: auto; background: #0b1220; border: 1px solid #30363d; border-radius: 8px;">
+        <li style="padding: 15px; color: #8fa7c4; text-align: center;">Loading archive...</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- RIGHT COLUMN: CLOUDINARY SNAPSHOTS -->
+  <section class="card card-cloud-snapshots" style="display: flex; flex-direction: column; gap: 16px;">
+    <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
+      <h3>Cloudinary Security Snapshots</h3>
+      <button class="btn btn-secondary" onclick="loadSnapshots()" style="padding: 4px 12px; font-size: 12px;">Refresh Feed</button>
+    </div>
+    
+    <div id="snapshotGrid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; max-height: 540px; overflow-y: auto; padding-right: 4px;">
+      <p style="color: #8fa7c4; grid-column: 1 / -1; text-align: center; padding: 20px;">Loading cloud snapshots...</p>
+    </div>
+  </section>
+
+</div>
+
+<script>
+  // --- DVR Video Player Logic ---
+  async function loadVideoArchive() {
+    const list = document.getElementById('videoList');
+    try {
+      const res = await fetch('/api/recordings');
+      const data = await res.json();
+      
+      list.innerHTML = '';
+      if (data.recordings && data.recordings.length > 0) {
+        data.recordings.forEach((vid, index) => {
+          const date = new Date(vid.timestamp * 1000).toLocaleString();
+          const li = document.createElement('li');
+          li.style = "padding: 12px 14px; border-bottom: 1px solid #21262d; display: flex; justify-content: space-between; align-items: center; cursor: pointer; transition: background 0.2s;";
+          li.onmouseover = () => li.style.background = '#161b22';
+          li.onmouseout = () => li.style.background = 'transparent';
+          li.onclick = () => playVideo(vid.filename);
+          
+          li.innerHTML = `
+            <div>
+              <div style="color: #c9d1d9; font-weight: 600; font-size: 13px;">📹 ${vid.filename}</div>
+              <div style="color: #8fa7c4; font-size: 11px; margin-top: 2px;">${date}</div>
+            </div>
+            <span style="background: rgba(53, 224, 122, 0.15); color: #35e07a; padding: 3px 8px; border-radius: 12px; font-size: 11px; font-weight: bold;">
+              ${vid.size_mb} MB
+            </span>
+          `;
+          list.appendChild(li);
+        });
+      } else {
+        list.innerHTML = '<li style="padding: 25px; text-align: center; color: #8fa7c4; font-size: 13px;">No video recordings found.<br><small style="color: #6e7681;">Ensure robot camera is online before recording.</small></li>';
+      }
+    } catch (err) {
+      list.innerHTML = '<li style="padding: 20px; text-align: center; color: #da3633;">Error loading video archive.</li>';
+    }
+  }
+
+  function playVideo(filename) {
+    const player = document.getElementById('dvrPlayer');
+    const placeholder = document.getElementById('dvrPlaceholder');
+    
+    placeholder.style.display = 'none';
+    player.style.display = 'block';
+    player.src = `/recordings/${filename}`;
+    player.load();
+    player.play().catch(e => console.log('Autoplay deferred:', e));
+  }
+
+  // --- Cloudinary Snapshot Logic ---
+  async function loadSnapshots() {
+    const grid = document.getElementById('snapshotGrid');
+    grid.innerHTML = '<p style="color: #8fa7c4; grid-column: 1 / -1; text-align: center; padding: 20px;">Fetching from Cloudinary...</p>';
+    
+    try {
+      const res = await fetch('/api/snapshots');
+      const data = await res.json();
+      
+      grid.innerHTML = '';
+      if (data.snapshots && data.snapshots.length > 0) {
+        data.snapshots.forEach(url => {
+          const div = document.createElement('div');
+          div.style = "background: #0b1220; border: 1px solid #30363d; border-radius: 8px; overflow: hidden; position: relative; transition: transform 0.2s, border-color 0.2s;";
+          div.onmouseover = () => { div.style.transform = 'translateY(-2px)'; div.style.borderColor = '#58a6ff'; };
+          div.onmouseout = () => { div.style.transform = 'none'; div.style.borderColor = '#30363d'; };
+          
+          div.innerHTML = `
+            <a href="${url}" target="_blank" style="display: block; text-decoration: none;">
+              <img src="${url}" alt="Security Snapshot" style="width: 100%; height: 130px; object-fit: cover; display: block;">
+            </a>
+          `;
+          grid.appendChild(div);
+        });
+      } else {
+        grid.innerHTML = '<p style="color: #8fa7c4; grid-column: 1 / -1; text-align: center; padding: 20px;">No snapshots found in the cloud archive.</p>';
+      }
+    } catch (err) {
+      grid.innerHTML = '<p style="color: #da3633; grid-column: 1 / -1; text-align: center; padding: 20px;">Error loading snapshots from Cloudinary.</p>';
+    }
+  }
+
+  document.addEventListener("DOMContentLoaded", () => {
+    loadVideoArchive();
+    loadSnapshots();
+  });
+</script>
+
+{% endblock %}

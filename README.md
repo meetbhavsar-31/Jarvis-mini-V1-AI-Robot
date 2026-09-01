@@ -1,48 +1,73 @@
-# JARVIS MINI V2 🤖🧠
+# 🤖 JARVIS MINI V2 — Master Tactical AI Robot
 
-> **An affordable, fully local, autonomous AI assistant and robot car.**
+<div align="center">
 
-## 📖 What is JARVIS MINI?
-JARVIS MINI bridges physical hardware with a powerful local desktop AI brain via Wi-Fi. By combining real-time computer vision, conversational speech processing, and edge hardware control, JARVIS can navigate physical spaces, recognize objects, and communicate naturally with users through an interactive web dashboard. 
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue?style=for-the-badge&logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.100%2B-009688?style=for-the-badge&logo=fastapi&logoColor=white)
+![OpenCV](https://img.shields.io/badge/OpenCV-Computer%20Vision-5C3EE8?style=for-the-badge&logo=opencv&logoColor=white)
+![ESP32](https://img.shields.io/badge/ESP32-Hardware%20Bridge-E7352C?style=for-the-badge&logo=espressif&logoColor=white)
+![Groq](https://img.shields.io/badge/Groq-VLM%20%26%20Whisper-F55036?style=for-the-badge)
+![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)
 
-**Privacy First:** All AI processing (Vision, LLM, Speech-to-Text, and Text-to-Speech) happens 100% locally on your machine. No cloud APIs are required!
+<p align="center">
+  <b>An autonomous, multi-modal robotics system powered by FastAPI, ESP32 microcontrollers, Groq Vision Language Models, and real-time biometric tracking.</b>
+</p>
 
----
-
-## 🧠 Local AI Models Explained
-Because AI models are massive files, they are **not** included in this repository to keep the download fast. You will need to download them locally before running the robot:
-
-1. **The Brain (LLM):** Powered by Ollama. 
-   * **Setup:** Install [Ollama](https://ollama.com/) and run `ollama run qwen2.5:3b` in your terminal to download the local conversation model.
-2. **The Eyes (Vision):** Powered by YOLO (Ultralytics).
-   * **Setup:** The Python script will automatically download the lightweight `yolov8n.pt` or `yolo11n.pt` model on its first run, or you can place them in the root directory.
-3. **The Voice (TTS):** Powered by Kokoro ONNX.
-   * **Setup:** Download `kokoro-v1.0.onnx` and `voices-v1.0.bin` and place them in the root directory.
-4. **The Ears (STT):** Powered by Vosk.
-   * **Setup:** Download the [Vosk English Model](https://alphacephei.com/vosk/models) (e.g., `vosk-model-small-en-us`) and extract it into the `resources/voices/` folder.
+</div>
 
 ---
 
-## 🛠️ Hardware Stack
-* **Microcontrollers:** ESP8266 NodeMCU (Main Core) & ESP32-CAM (Vision Node)
-* **Movement:** L298N Motor Driver, 2WD Smart Car Chassis
-* **Sensors:** HC-SR04 Ultrasonic Sensor, PCF8574 I/O Expander
-* **Face & Audio:** ST7789 TFT Display, INMP441 Microphone, MAX98357A Amplifier, 8Ω Speaker
-* **Power:** 2x 18650 Battery Shield V8 Module (Recommended) OR Standard 5V USB Power Bank
+## 📑 Table of Contents
+- [Project Overview](#-project-overview)
+- [System Architecture](#-system-architecture)
+- [Key Features](#-key-features)
+- [Hardware & Hardware Pins](#-hardware--hardware-pins)
+- [Directory Structure](#-directory-structure)
+- [Installation & Setup](#-installation--setup)
+- [Environment Configuration](#-environment-configuration)
+- [Running the System](#-running-the-system)
+- [API Reference](#-api-reference)
+- [Autonomous Behaviors & Protocols](#-autonomous-behaviors--protocols)
+- [Troubleshooting](#-troubleshooting)
 
 ---
 
-## 🚀 Getting Started
+## 🌟 Project Overview
 
-### 1. Software Installation
-```bash
-# Clone the repository
-git clone [https://github.com/meetbhavsar-31/Jarvis-mini-V1-AI-Robot.git](https://github.com/meetbhavsar-31/Jarvis-mini-V1-AI-Robot.git)
-cd Jarvis-mini-V1-AI-Robot
+**JARVIS MINI V2** is a modular robotics platform that bridges embedded hardware (ESP32 / ESP32-CAM) with cutting-edge Cloud & Local AI agents. The central server is written in **FastAPI** to enable:
 
-# Create and activate a virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+- **Ultra-low latency streaming** via asynchronous WebSockets and MJPEG video feeds.
+- **Natural Language Interaction** in multiple languages (English & Hindi) powered by Whisper-large-v3, Groq Qwen/Llama Vision pipelines, and local Ollama failover.
+- **Biometric Face Tracking & Gesture Navigation** through OpenCV and MediaPipe.
+- **Long-term Retrieval-Augmented Generation (RAG)** vector memory via ChromaDB.
+- **Full Autonomous Roaming & Obstacle Avoidance** with automatic path recording and reverse-to-base capabilities.
 
-# Install dependencies
-pip install -r requirements.txt
+---
+
+## 🏗 System Architecture
+
+```text
+       ┌────────────────────────────────────────────────────────┐
+       │                 JARVIS Brain (FastAPI)                 │
+       │                                                        │
+       │  ┌─────────────────┐  ┌─────────────────────────────┐  │
+       │  │  Vision Pipeline│  │   Groq VLM / Whisper STT    │  │
+       │  │  (Face/Gesture) │  │   & Local Ollama Fallback   │  │
+       │  └────────┬────────┘  └──────────────┬──────────────┘  │
+       │           │                          │                 │
+       │  ┌────────┴────────┐  ┌──────────────┴──────────────┐  │
+       │  │ ChromaDB Memory │  │ gTTS / Socket Audio Stream  │  │
+       │  └─────────────────┘  └─────────────────────────────┘  │
+       └───────────────────────────┬────────────────────────────┘
+                                   │
+                    HTTP REST / TCP Raw Audio / MJPEG
+                                   │
+         ┌─────────────────────────┴─────────────────────────┐
+         │                                                   │
+         ▼                                                   ▼
+┌──────────────────┐                               ┌──────────────────┐
+│   ESP32-S Node   │                               │    ESP32-CAM     │
+│   (Locomotion,   │                               │  (Headless Vision│
+│  Sensors, Eyes,  │                               │    Capture Node) │
+│    Audio I/O)    │                               └──────────────────┘
+└──────────────────┘

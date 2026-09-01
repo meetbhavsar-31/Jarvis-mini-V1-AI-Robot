@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>JARVIS Dashboard{% block title %}{% endblock %}</title>
+<link rel="stylesheet" href="{{ url_for('static', path='css/style.css') }}">
+<style>
+  /* Cinematic Boot Screen Overlay */
+  #jarvisBootScreen {
+    position: fixed;
+    top: 0; left: 0; width: 100vw; height: 100vh;
+    background: #05070d;
+    z-index: 99999;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    color: #00bfff;
+    font-family: 'Consolas', monospace;
+    transition: opacity 0.8s ease-in-out;
+  }
+  #jarvisBootScreen.fade-out {
+    opacity: 0;
+    pointer-events: none;
+  }
+  .boot-logo {
+    font-size: 48px;
+    font-weight: bold;
+    letter-spacing: 6px;
+    margin-bottom: 10px;
+    text-shadow: 0 0 20px rgba(0, 191, 255, 0.6);
+  }
+  .boot-sub {
+    font-size: 14px;
+    color: #8fa7c4;
+    letter-spacing: 3px;
+    margin-bottom: 30px;
+  }
+  .boot-bar-container {
+    width: 300px;
+    height: 4px;
+    background: #161b22;
+    border-radius: 2px;
+    overflow: hidden;
+    border: 1px solid #30363d;
+  }
+  .boot-bar-fill {
+    width: 0%;
+    height: 100%;
+    background: #00bfff;
+    box-shadow: 0 0 10px #00bfff;
+    animation: loadBootBar 1.5s forwards ease-in-out;
+  }
+  @keyframes loadBootBar {
+    0% { width: 0%; }
+    50% { width: 75%; }
+    100% { width: 100%; }
+  }
+</style>
+</head>
+<body class="app-page-active {{ 'dashboard-page-active' if active_page == 'dashboard' else '' }}">
+
+  <!-- CINEMATIC BOOT SCREEN -->
+  <div id="jarvisBootScreen">
+    <div class="boot-logo">JARVIS MINI V2</div>
+    <div class="boot-sub">INITIALIZING NEURAL & TACTICAL LINKS</div>
+    <div class="boot-bar-container">
+      <div class="boot-bar-fill"></div>
+    </div>
+  </div>
+
+  <!-- ===================== TOP BAR ===================== -->
+  <header class="topbar">
+    <div class="topbar-left">
+      <button id="burgerBtn" class="burger-btn" aria-label="Toggle navigation">
+        <span></span>
+        <span></span>
+        <span></span>
+      </button>
+      <div class="brand">
+        <span class="brand-mark">J</span>
+        <span class="brand-name">JARVIS<span class="brand-sub">DASHBOARD</span></span>
+      </div>
+    </div>
+
+    <div class="topbar-right">
+      <div class="status-pill status-online">
+        <span class="dot dot-online"></span> ONLINE
+      </div>
+      <div class="status-pill">
+        <span class="dot dot-wifi"></span> WiFi &middot; <span id="ipAddress">192.168.1.42</span>
+      </div>
+      <div class="status-pill clock" id="liveClock">--:--:--</div>
+    </div>
+  </header>
+
+  <!-- ===================== SLIDE-OUT NAV ===================== -->
+  <div id="navOverlay" class="nav-overlay"></div>
+  <nav id="sideNav" class="side-nav">
+    <div class="side-nav-header">
+      <span class="brand-mark small">J</span> Navigation
+    </div>
+    <ul class="side-nav-links">
+      <li><a href="{{ url_for('dashboard') }}" class="{{ 'active' if active_page == 'dashboard' else '' }}">
+        <span class="nav-icon">&#9679;</span> Dashboard</a></li>
+      <li><a href="{{ url_for('camera') }}" class="{{ 'active' if active_page == 'camera' else '' }}">
+        <span class="nav-icon">&#9673;</span> Camera View</a></li>
+      <li><a href="{{ url_for('controls') }}" class="{{ 'active' if active_page == 'controls' else '' }}">
+        <span class="nav-icon">&#9650;</span> Controls</a></li>
+      <li><a href="{{ url_for('system') }}" class="{{ 'active' if active_page == 'system' else '' }}">
+        <span class="nav-icon">&#9881;</span> System</a></li>
+      <li><a href="{{ url_for('settings') }}" class="{{ 'active' if active_page == 'settings' else '' }}">
+        <span class="nav-icon">&#9881;</span> Settings</a></li>
+      <li><a href="{{ url_for('logs') }}" class="{{ 'active' if active_page == 'logs' else '' }}">
+        <span class="nav-icon">&#8801;</span> Activity Logs</a></li>
+    </ul>
+  </nav>
+
+  <!-- ===================== PAGE CONTENT ===================== -->
+  <main class="page-content">
+    {% block content %}{% endblock %}
+  </main>
+
+  <script src="{{ url_for('static', path='js/script.js') }}"></script>
+  <script>
+    // Fade out boot screen after page loads
+    window.addEventListener("load", () => {
+      setTimeout(() => {
+        const bootScreen = document.getElementById("jarvisBootScreen");
+        if (bootScreen) {
+          bootScreen.classList.add("fade-out");
+          setTimeout(() => bootScreen.remove(), 800);
+        }
+      }, 1200);
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %} — Activity Logs{% endblock %}
+{% block content %}
+
+<div class="page-header">
+  <h2>Activity Logs</h2>
+  <p class="page-subtitle">Full timestamped event history, pulled from /api/activity-log</p>
+</div>
+
+<section class="card card-logs-full">
+  <ul class="log-list-full" id="activityLogFull">
+    <li class="log-loading">Loading...</li>
+  </ul>
+</section>
+
+{% endblock %}

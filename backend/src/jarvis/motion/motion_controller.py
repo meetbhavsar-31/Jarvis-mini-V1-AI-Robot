@@ -1,25 +1,22 @@
 import os
-import yaml
 import requests
 import time
+from dotenv import load_dotenv
 from jarvis.common.logger import setup_logger
+
+# Load environment variables from the .env file in your root folder
+load_dotenv()
 
 logger = setup_logger()
 
 class MotionController:
     def __init__(self):
-        # Calculate root directory path (4 levels up from motion/)
-        root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../"))
-        config_path = os.path.join(root_dir, "config", "robot.yaml")
-        
-        with open(config_path, 'r') as file:
-            self.config = yaml.safe_load(file)
-            
-        self.robot_ip = self.config['hardware']['robot_ip']
+        # Load ESP32 IP centrally from .env (replaces old robot.yaml logic)
+        self.robot_ip = os.getenv("ESP32_IP", "http://jarvis.local").rstrip("/")
         logger.info(f"Motion Controller Initialized. Target Robot IP: {self.robot_ip}")
 
     def execute_movement(self, direction: str, duration_seconds: float) -> str:
-        """Sends movement commands to the ESP32 web server."""
+        """Sends movement commands to the ESP web server."""
         logger.info(f"Moving {direction} for {duration_seconds} seconds.")
         valid_directions = ["forward", "backward", "left", "right", "stop"]
         
@@ -27,7 +24,7 @@ class MotionController:
             return f"Error: Invalid direction '{direction}'."
         
         try:
-            # Send the initial move command to the ESP32
+            # Send the initial move command to the ESP
             url = f"{self.robot_ip}/move?dir={direction}"
             requests.get(url, timeout=2)
             
@@ -40,18 +37,33 @@ class MotionController:
             
         except requests.exceptions.RequestException as e:
             logger.error(f"Hardware communication error: {e}")
-            return "Failed to move. I cannot reach the ESP32 hardware on the network."
+            return "Failed to move. I cannot reach the ESP hardware on the network."
 
     def execute_eye_color(self, red: int, green: int, blue: int) -> str:
-        """Sends RGB eye color update commands to the ESP32 hardware."""
+        """Sends RGB eye color update commands to the ESP hardware."""
         logger.info(f"Sending Eye Color to Hardware: RGB({red}, {green}, {blue})")
         
         try:
-            # Construct the endpoint URL for eye color control on the ESP32
             url = f"{self.robot_ip}/eyes?r={red}&g={green}&b={blue}"
             requests.get(url, timeout=2)
             return f"Successfully updated eye color to RGB({red}, {green}, {blue})."
             
         except requests.exceptions.RequestException as e:
             logger.error(f"Hardware communication error (Eyes): {e}")
-            return "Failed to update eye color. I cannot reach the ESP32 hardware on the network."
+            return "Failed to update eye color. I cannot reach the ESP hardware on the network."
+
+    def get_distance(self) -> float:
+        """Fetches the ultrasonic sensor distance from the ESP web server."""
+        try:
+            # Ask the ESP for the current distance
+            url = f"{self.robot_ip}/distance"
+            response = requests.get(url, timeout=1)
+            
+            if response.status_code == 200:
+                # Convert the returned text (e.g., "15.5") into a float
+                return float(response.text.strip())
+            
+            return 0.0
+        except Exception:
+            # Suppress logging here to prevent terminal flooding (runs every 0.2s)
+            return 0.0

@@ -1,70 +1,109 @@
 import os
-import urllib.request
+import uuid
 import threading
-import sounddevice as sd
-from kokoro_onnx import Kokoro
+import pygame
+import requests
+from dotenv import load_dotenv
+from gtts import gTTS
 from jarvis.common.logger import setup_logger
+
+# Load environment variables from the .env file in your root folder
+load_dotenv()
 
 logger = setup_logger()
 
-class KokoroSpeaker:
-    def __init__(self, voice="af_heart"): # Change "af_bella" to "af_heart" here
-        logger.info("Initializing offline Kokoro TTS Engine...")
-        self.voice = voice
-        
-        # 1. Define paths for the local AI models (Updated to v1.0)
-        self.model_path = "kokoro-v1.0.onnx"
-        self.voices_path = "voices-v1.0.bin"
-        
-        # 2. Download the models if this is the first time running
-        self._ensure_models_downloaded()
-        
-        # 3. Initialize the ONNX Engine
-        self.kokoro = Kokoro(self.model_path, self.voices_path)
-        logger.info(f"Kokoro TTS Ready. Voice: {self.voice}")
+# Load ESP32 IP centrally from .env (e.g., http://192.168.1.50 or http://jarvis.local)
+ESP32_IP = os.getenv("ESP32_IP", "http://jarvis.local").rstrip("/")
 
-    def _ensure_models_downloaded(self):
-        """Automatically downloads the required ONNX model and voice profiles."""
-        # Updated URLs for Kokoro v1.0 release
-        model_url = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx"
-        voices_url = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin"
+def send_mouth_animation_state(speaking: bool):
+    """Sends a fast HTTP GET request to the ESP32 to trigger the mouth animation."""
+    if not ESP32_IP:
+        return
+
+    def _request():
+        state = "on" if speaking else "off"
+        url = f"{ESP32_IP}/talk?state={state}"
+        try:
+            res = requests.get(url, timeout=0.8)
+            logger.debug(f"Face Sync ({state}) -> {ESP32_IP}: {res.status_code}")
+        except Exception as e:
+            logger.debug(f"Failed to sync face animation: {e}")
+
+    threading.Thread(target=_request, daemon=True).start()
+
+
+class GoogleSpeaker:
+    def __init__(self, lang="en", tld="co.uk"):
+        logger.info("Initializing Hybrid TTS Engine (Google + Local Fallback + Auto Face Sync)...")
+        self.lang = lang
+        self.tld = tld
+        self.speech_lock = threading.Lock()
         
-        if not os.path.exists(self.model_path):
-            logger.info("Downloading Kokoro v1.0 ONNX model... This will take a moment.")
-            urllib.request.urlretrieve(model_url, self.model_path)
-            logger.info("Model download complete!")
-        
-        if not os.path.exists(self.voices_path):
-            logger.info("Downloading voice profiles...")
-            urllib.request.urlretrieve(voices_url, self.voices_path)
-            logger.info("Voice profiles download complete!")
+        if not pygame.mixer.get_init():
+            pygame.mixer.init()
+            
+        logger.info(f"Hybrid TTS Engine Ready (Lang: {self.lang}, Accent: {self.tld})")
 
     def _speak_thread(self, text: str):
-        """The threaded function that generates and plays the audio offline."""
-        logger.info(f"Synthesizing: '{text}'")
-        try:
-            # Generate the raw audio data
-            audio, sample_rate = self.kokoro.create(
-                text, voice=self.voice, speed=1.0, lang="en-us"
-            )
-            
-            # Play the audio instantly using sounddevice
-            sd.play(audio, sample_rate)
-            sd.wait() # Wait for playback to finish
-            
-        except Exception as e:
-            logger.error(f"Kokoro TTS Playback Error: {e}")
+        with self.speech_lock:
+            filename = f"tts_{uuid.uuid4().hex}.mp3"
+            success = False
+
+            # 1. Trigger mouth animation ON
+            send_mouth_animation_state(True)
+
+            # --- ATTEMPT 1: GOOGLE CLOUD TTS (PRIMARY) ---
+            try:
+                logger.info(f"Synthesizing via Google TTS: '{text}'")
+                tts = gTTS(text=text, lang=self.lang, tld=self.tld)
+                tts.save(filename)
+                
+                pygame.mixer.music.load(filename)
+                pygame.mixer.music.play()
+                
+                while pygame.mixer.music.get_busy():
+                    pygame.time.Clock().tick(10)
+                    
+                success = True
+            except Exception as google_error:
+                logger.warning(f"Google TTS failed (offline): {google_error}. Switching to local SAPI fallback...")
+
+            # --- ATTEMPT 2: STABLE LOCAL OFFLINE TTS (FALLBACK) ---
+            if not success:
+                try:
+                    import pyttsx3
+                    import pythoncom
+                    
+                    logger.info(f"Synthesizing via Local Fallback Engine: '{text}'")
+                    pythoncom.CoInitialize()
+                    
+                    engine = pyttsx3.init()
+                    engine.say(text)
+                    engine.runAndWait()
+                    
+                    pythoncom.CoUninitialize()
+                    success = True
+                except Exception as local_error:
+                    logger.error(f"Both Google and Local Fallback TTS failed: {local_error}")
+
+            # 2. Turn mouth animation OFF
+            send_mouth_animation_state(False)
+
+            # Cleanup temporary file
+            try:
+                pygame.mixer.music.unload()
+                if os.path.exists(filename):
+                    os.remove(filename)
+            except Exception:
+                pass
 
     def speak(self, text: str):
-        """Spawns a new thread to synthesize and play text without blocking FastAPI."""
-        speech_thread = threading.Thread(target=self._speak_thread, args=(text,))
+        if not text or not text.strip():
+            return
+        speech_thread = threading.Thread(target=self._speak_thread, args=(text.strip(),), daemon=True)
         speech_thread.start()
 
-# Standalone test
+
 if __name__ == "__main__":
-    speaker = KokoroSpeaker()
-    speaker.speak("Hello! I am Jarvis, and my local neural voice is now fully operational.")
-    
-    # Keep the main thread alive long enough for the async speech to finish
-    import time
-    time.sleep(5)
+    speaker = GoogleSpeaker()
+    speaker.speak("Testing centralized ESP32 IP resolution and face sync.")

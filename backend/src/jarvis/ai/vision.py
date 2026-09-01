@@ -1,133 +1,151 @@
 import cv2
 import os
-import yaml
 import threading
 import time
-from ultralytics import YOLO
+import numpy as np
+import requests
+from dotenv import load_dotenv
 from jarvis.common.logger import setup_logger
 from jarvis.robot_runtime.telemetry_manager import TelemetryManager
 
+try:
+    import face_recognition
+except ImportError:
+    face_recognition = None
+
+load_dotenv()
 logger = setup_logger()
 
 class VisionPipeline:
     def __init__(self):
-        # Calculate root directory path (4 levels up from ai/ to project root)
-        root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../"))
-        config_path = os.path.join(root_dir, "config", "camera.yaml")
-        
-        with open(config_path, 'r') as file:
-            self.config = yaml.safe_load(file)['vision']
-            
-        self.stream_url = self.config['stream_url']
-        self.conf_threshold = self.config['confidence_threshold']
-        self.model_name = self.config['model']
-        
-        logger.info(f"Loading YOLO model ({self.model_name})...")
-        try:
-            self.model = YOLO(self.model_name)
-            logger.info(f"YOLO Vision Model ({self.model_name}) Initialized successfully.")
-        except Exception as e:
-            logger.error(f"Failed to load YOLO model ({self.model_name}): {e}")
-            raise
-
+        self.stream_url = os.getenv("ESP32_CAM_STREAM_URL", "http://192.168.29.175/stream")
         self.telemetry = TelemetryManager()
         self.running = False
         self.latest_frame = None
-        self.cap = None
         self.thread = None
+        self.lock = threading.Lock()
 
-    def start_stream(self):
-        """Starts background frame processing in a separate thread."""
-        if self.running:
-            logger.warning("Vision pipeline thread is already running.")
+        # Face Recognition Setup
+        self.known_face_encodings = []
+        self.known_face_names = []
+        self.recognized_names = []
+        self._load_known_faces()
+
+    def _load_known_faces(self, known_faces_dir="known_faces"):
+        """Loads reference photos from the root known_faces directory."""
+        if face_recognition is None:
+            logger.warning("face_recognition library not installed. Biometric identification disabled.")
             return
 
+        if not os.path.exists(known_faces_dir):
+            os.makedirs(known_faces_dir, exist_ok=True)
+            logger.info(f"Created '{known_faces_dir}' directory. Place reference images (e.g. Meet.jpg) inside.")
+            return
+
+        for filename in os.listdir(known_faces_dir):
+            if filename.lower().endswith((".jpg", ".png", ".jpeg")):
+                image_path = os.path.join(known_faces_dir, filename)
+                try:
+                    image = face_recognition.load_image_file(image_path)
+                    encodings = face_recognition.face_encodings(image)
+                    if encodings:
+                        self.known_face_encodings.append(encodings[0])
+                        name = os.path.splitext(filename)[0]
+                        self.known_face_names.append(name)
+                        logger.info(f"Loaded biometric profile for: {name}")
+                except Exception as e:
+                    logger.error(f"Failed to load face profile {filename}: {e}")
+
+    def start_stream(self):
+        if self.running:
+            return
         self.running = True
         self.thread = threading.Thread(target=self._process_loop, daemon=True)
         self.thread.start()
-        logger.info(f"Vision pipeline thread started for: {self.stream_url}")
-
-    def _open_capture_source(self, source):
-        """Helper method to open capture device with stream stability settings."""
-        if isinstance(source, int):
-            cap = cv2.VideoCapture(source)
-        else:
-            # Force FFMPEG backend for robust network stream parsing
-            cap = cv2.VideoCapture(source, cv2.CAP_FFMPEG)
-            
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        return cap
+        logger.info(f"Direct Persistent Vision stream thread started for: {self.stream_url}")
 
     def _process_loop(self):
-        # Handle integer camera IDs (webcam) vs URL strings (ESP32-CAM)
-        if isinstance(self.stream_url, int) or (isinstance(self.stream_url, str) and self.stream_url.isdigit()):
-            capture_source = int(self.stream_url)
-        else:
-            capture_source = self.stream_url
-
-        self.cap = self._open_capture_source(capture_source)
-        consecutive_failures = 0  
-
-        # COCO dataset label remapping dictionary (fixes cardboard boxes misclassified as vase/suitcase/book)
-        LABEL_MAP = {
-            "vase": "box",
-            "suitcase": "box/package",
-            "book": "box/paper item"
-        }
-
-        try:
-            while self.running:
-                ret, frame = self.cap.read()
-
-                # Handle connection drops / frame capture failures
-                if not ret:
-                    consecutive_failures += 1
-                    time.sleep(0.1)
-                    
-                    if consecutive_failures > 15:
-                        logger.warning(f"ESP32-CAM stream lost. Reconnecting to {self.stream_url}...")
-                        self.cap.release()
-                        time.sleep(1.0)
-                        self.cap = self._open_capture_source(capture_source)
-                        consecutive_failures = 0
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        
+        while self.running:
+            try:
+                response = requests.get(self.stream_url, stream=True, timeout=5, headers=headers)
+                if response.status_code != 200:
+                    time.sleep(1.0)
                     continue
 
-                consecutive_failures = 0  # Reset counter on successful frame read
-
-                # Serve initial frame instantly so the dashboard opens without blocking
-                if self.latest_frame is None:
-                    self.latest_frame = frame
-
-                # Run YOLO detection with optimized image size (imgsz=256) for smooth CPU frame rates
-                results = self.model(frame, conf=self.conf_threshold, imgsz=256, verbose=False)
-                annotated_frame = results[0].plot()
-
-                # Collect unique detected object names with custom label remapping
-                detected_objects = []
-                for box in results[0].boxes:
-                    class_id = int(box.cls[0])
-                    raw_name = self.model.names[class_id]
-                    class_name = LABEL_MAP.get(raw_name, raw_name)
+                bytes_data = bytes()
+                for chunk in response.iter_content(chunk_size=4096):
+                    if not self.running:
+                        break
                     
-                    if class_name not in detected_objects:
-                        detected_objects.append(class_name)
+                    bytes_data += chunk
+                    a = bytes_data.find(b'\xff\xd8')
+                    b = bytes_data.find(b'\xff\xd9')
+                    
+                    if a != -1 and b != -1:
+                        jpg = bytes_data[a:b+2]
+                        bytes_data = bytes_data[b+2:]
+                        
+                        frame = cv2.imdecode(np.frombuffer(jpg, dtype=np.uint8), cv2.IMREAD_COLOR)
+                        if frame is not None:
+                            # Run face identification check periodically
+                            if face_recognition and self.known_face_encodings:
+                                self._identify_faces_in_frame(frame)
 
-                # Update real-time vision telemetry in SQLite & store annotated frame
-                self.telemetry.update_vision_state(detected_objects)
-                self.latest_frame = annotated_frame
+                            with self.lock:
+                                self.latest_frame = frame
 
-        finally:
-            if self.cap:
-                self.cap.release()
-            logger.info("Vision processing thread terminated and resources released.")
+            except Exception as e:
+                logger.warning(f"ESP32 stream reconnecting: {e}")
+                time.sleep(1.0)
+
+    def _identify_faces_in_frame(self, frame):
+        try:
+            small_frame = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
+            rgb_small_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
+            
+            face_locations = face_recognition.face_locations(rgb_small_frame)
+            face_encodings = face_recognition.face_encodings(rgb_small_frame, face_locations)
+            
+            current_recognized = []
+            for face_encoding in face_encodings:
+                matches = face_recognition.compare_faces(self.known_face_encodings, face_encoding, tolerance=0.5)
+                name = "Unknown"
+                
+                if True in matches:
+                    first_match_index = matches.index(True)
+                    name = self.known_face_names[first_match_index]
+                
+                current_recognized.append(name)
+            
+            with self.lock:
+                self.recognized_names = current_recognized
+        except Exception as e:
+            logger.error(f"Face identification error: {e}")
 
     def get_latest_frame(self):
-        """Returns the current annotated OpenCV frame instantly."""
-        return self.latest_frame
+        with self.lock:
+            return self.latest_frame
+
+    def get_recognized_faces(self):
+        with self.lock:
+            return list(set(self.recognized_names))
+
+    def generate_mjpeg_stream(self):
+        while self.running:
+            frame = self.get_latest_frame()
+            if frame is not None:
+                success, buffer = cv2.imencode('.jpg', frame)
+                if success:
+                    yield (b'--frame\r\n'
+                           b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+            time.sleep(0.05)
+
+    def get_detected_labels(self):
+        return self.get_recognized_faces()
 
     def stop_stream(self):
-        """Stops vision processing gracefully."""
         self.running = False
         if self.thread and self.thread.is_alive():
             self.thread.join(timeout=2.0)
-        logger.info("Vision pipeline stop signal sent.")

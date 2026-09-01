@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+{% block title %} — Dashboard{% endblock %}
+{% block content %}
+
+<div class="dashboard-viewport">
+<!-- You can resize the columns here by changing 1fr, 1.8fr, 1fr -->
+<div class="grid-dashboard-3col" style="grid-template-columns: 1fr 1.8fr 1fr; gap: 16px; align-items: stretch; height: 100%;">
+
+  <!-- LEFT COLUMN -->
+  <div class="dash-col dash-col-left">
+
+    <section class="card card-activity-compact">
+      <div class="card-header">
+        <h3>Activity Log</h3>
+        <a href="{{ url_for('logs') }}" class="card-link">View All &rarr;</a>
+      </div>
+      <ul class="log-list-compact" id="activityLogCompact">
+        <li class="log-loading">Loading...</li>
+      </ul>
+    </section>
+
+    <section class="card card-quick-actions">
+      <div class="card-header"><h3>Action Controls</h3></div>
+      <div class="quick-action-cluster">
+        <button class="btn btn-secondary" data-command="screenshot">Take Screenshot</button>
+        <button class="btn btn-secondary" data-command="record_start">Record Video</button>
+      </div>
+      <button class="btn btn-primary btn-full" data-command="autonomy_start" style="margin-bottom: 8px;">Start Autonomy</button>
+      <!-- RESTORED HANDS-FREE BUTTON -->
+      <button id="handsFreeBtn" class="btn btn-secondary btn-full" style="background: #1f6feb; color: white;">HANDS-FREE WAKE WORD: OFF</button>
+    </section>
+
+    <section class="card card-manual-controls">
+      <div class="card-header"><h3>Manual Controls</h3></div>
+      <div class="dpad">
+        <button class="dpad-btn dpad-up" data-direction="forward" aria-label="Forward">&#9650;</button>
+        <button class="dpad-btn dpad-left" data-direction="left" aria-label="Left">&#9664;</button>
+        <button class="dpad-btn dpad-stop" data-direction="stop" aria-label="Stop">&#9632;</button>
+        <button class="dpad-btn dpad-right" data-direction="right" aria-label="Right">&#9654;</button>
+        <button class="dpad-btn dpad-down" data-direction="backward" aria-label="Backward">&#9660;</button>
+      </div>
+    </section>
+
+    <div class="eye-panel-wrapper" style="display: flex; gap: 10px; margin-top: 10px;">
+      <div class="card mini-face-card" id="miniFaceCard" style="display: flex; align-items: center; justify-content: center; padding: 10px;">
+          <svg viewBox="0 0 200 110" width="72" height="44" xmlns="http://www.w3.org/2000/svg">
+          <g class="mini-face-eyes">
+            <circle class="mini-face-eye-ring" cx="60" cy="42" r="17" fill="none" stroke="currentColor" stroke-width="8"></circle>
+            <circle class="mini-face-eye-pupil" cx="60" cy="42" r="6" fill="currentColor"></circle>
+            <circle class="mini-face-eye-ring" cx="140" cy="42" r="17" fill="none" stroke="currentColor" stroke-width="8"></circle>
+            <circle class="mini-face-eye-pupil" cx="140" cy="42" r="6" fill="currentColor"></circle>
+          </g>
+          <path class="mini-face-mouth" d="M 68 80 Q 100 100 132 80" fill="none" stroke="currentColor" stroke-width="8" stroke-linecap="round"></path>
+          </svg>
+      </div>
+
+      <section class="card card-eye-color" style="flex: 1;">
+        <div class="card-header" style="margin-bottom: 5px;"><h3 style="font-size: 11px;">Robot Eyes Color</h3></div>
+        <div class="eye-color-row" style="display: flex; gap: 5px; flex-wrap: wrap;">
+          <button class="eye-color-swatch" style="width: 20px; height: 20px; border-radius: 50%; background-color:#1de9b6;" data-color="teal"></button>
+          <button class="eye-color-swatch" style="width: 20px; height: 20px; border-radius: 50%; background-color:#ff4d6d;" data-color="pink"></button>
+          <button class="eye-color-swatch" style="width: 20px; height: 20px; border-radius: 50%; background-color:#2ecc71;" data-color="green"></button>
+          <button class="eye-color-swatch" style="width: 20px; height: 20px; border-radius: 50%; background-color:#ffc107;" data-color="yellow"></button>
+          <button class="eye-color-swatch" style="width: 20px; height: 20px; border-radius: 50%; background-color:#29b6f6;" data-color="blue"></button>
+          <button class="eye-color-swatch active" style="width: 20px; height: 20px; border-radius: 50%; background-color:#ab47bc;" data-color="purple"></button>
+        </div>
+      </section>
+    </div>
+
+  </div>
+
+  <!-- MIDDLE COLUMN -->
+  <div class="dash-col dash-col-middle" style="display: flex; flex-direction: column;">
+
+    <section class="card card-camera-preview" style="flex: 1; display: flex; flex-direction: column;">
+      <div class="card-header">
+        <h3>ESP32 Camera Stream</h3>
+        <a href="{{ url_for('camera') }}" class="card-link">Full View &rarr;</a>
+      </div>
+      <!-- REAL CAMERA FEED (CLEAN) -->
+      <div class="camera-preview" id="cameraPreviewSmall" style="position: relative; flex: 1; border-radius: 8px; overflow: hidden; background: #000;">
+        <img src="/video_feed" alt="Live Stream" style="width: 100%; height: 100%; object-fit: cover; position: absolute; top: 0; left: 0;">
+      </div>
+    </section>
+
+    <section class="card card-battery-small" style="margin-top: 10px;">
+      <div class="battery-strip" id="batteryStrip" style="display: flex; justify-content: space-around; font-size: 12px;">
+        <span class="battery-icon">&#128267;</span>
+        <span class="battery-percent" id="batteryPercent" style="color: #35e07a; font-weight: bold;">76%</span>
+        <span class="battery-state" id="batteryState">Discharging</span>
+        <span class="battery-source" id="batterySource">Battery</span>
+      </div>
+    </section>
+
+  </div>
+
+  <!-- RIGHT COLUMN -->
+  <div class="dash-col dash-col-right">
+    
+    <section class="card card-chat" style="height: 100%; display: flex; flex-direction: column;">
+      <div class="card-header"><h3>JARVIS Voice Assistant</h3></div>
+
+      <ul class="chat-messages" id="dashboardChatMessages" style="flex: 1; overflow-y: auto; padding: 10px; background: rgba(0,0,0,0.2); border-radius: 8px; margin-bottom: 10px;">
+        <li class="response-empty" style="color: #8fa7c4; font-size: 12px;">No messages yet — try a quick command or type below.</li>
+      </ul>
+
+      <div class="quick-command-chips chat-chips" style="display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 10px;">
+        <button class="chip" data-command-text="Hey Jarvis" style="padding: 5px 10px; border-radius: 20px; font-size: 11px; background: #161b22; color: #8fa7c4; border: 1px solid #30363d; cursor: pointer;">Hey Jarvis</button>
+        <button class="chip" data-command-text="What do you see?" style="padding: 5px 10px; border-radius: 20px; font-size: 11px; background: #161b22; color: #8fa7c4; border: 1px solid #30363d; cursor: pointer;">What do you see?</button>
+        <button class="chip" data-command-text="Go Forward" style="padding: 5px 10px; border-radius: 20px; font-size: 11px; background: #161b22; color: #8fa7c4; border: 1px solid #30363d; cursor: pointer;">Go Forward</button>
+        <button class="chip" data-command-text="Status Report" style="padding: 5px 10px; border-radius: 20px; font-size: 11px; background: #161b22; color: #8fa7c4; border: 1px solid #30363d; cursor: pointer;">Status Report</button>
+      </div>
+
+     <form class="chat-input-row" id="dashboardChatForm" style="display: flex; gap: 10px; margin-bottom: 10px;">
+        <input type="text" id="dashboardChatInput" placeholder="Message Jarvis..." autocomplete="off" style="flex: 1; padding: 10px; border-radius: 20px; border: 1px solid #30363d; background: #0b1220; color: white;">
+        <button type="button" id="dashboardMicButton" class="chat-mic-btn" style="width: 38px; height: 38px; border-radius: 50%; background: #161b22; color: #00bfff; border: 1px solid #30363d; cursor: pointer;">&#127908;</button>
+        <button type="submit" class="chat-send-btn" style="width: 38px; height: 38px; border-radius: 50%; background: #00bfff; color: #05070d; border: none; cursor: pointer; font-weight: bold;">&#10148;</button>
+      </form>
+
+      <div class="lang-toggle-row" style="display: flex; gap: 10px;">
+        <button class="lang-btn active" data-lang="en" style="flex: 1; padding: 8px; border-radius: 20px; font-size: 12px; cursor: pointer;">English</button>
+        <button class="lang-btn" data-lang="hi" style="flex: 1; padding: 8px; border-radius: 20px; font-size: 12px; cursor: pointer;">हिंदी</button>
+      </div>
+    </section>
+
+  </div>
+
+</div>
+</div>
+{% endblock %}

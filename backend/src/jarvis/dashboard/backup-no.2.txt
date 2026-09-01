@@ -1,0 +1,900 @@
+import cv2
+import re
+import os
+import time
+import uuid
+import base64
+import random
+import threading
+import requests
+import numpy as np
+import wave
+import socket
+import psutil
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+
+try:
+    from gtts import gTTS
+    from pydub import AudioSegment
+except ImportError:
+    AudioSegment = None
+
+from datetime import datetime
+from dotenv import load_dotenv
+from fastapi import FastAPI, Request, UploadFile, File
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
+from groq import Groq
+
+from jarvis.common.logger import setup_logger
+from jarvis.ai.vision import VisionPipeline
+from jarvis.ai.brain import JarvisBrain
+from jarvis.motion.motion_controller import MotionController
+from jarvis.memory.rag import LongTermMemoryManager
+from jarvis.storage.cloud_manager import CloudManager
+
+# Load environment variables from root .env
+load_dotenv()
+
+logger = setup_logger()
+app = FastAPI(title="JARVIS MINI V1 - Master Tactical Dashboard")
+logger.info("Initializing JARVIS Core Systems...")
+
+# ==========================================
+# IMPORT PC-BASED POCKETSPHINX WAKE WORD ENGINE
+# ==========================================
+try:
+    from jarvis.ai.local_wake_word import LocalWakeWordListener
+    logger.info("Local Wake Word Engine Loaded (Listening for 'Jarvis').")
+except Exception as e:
+    logger.warning(f"Wake word engine not loaded: {e}. Defaulting to standard VAD.")
+    LocalWakeWordListener = None
+
+WAITING_FOR_WAKE_WORD = True  # Start in sleep mode
+
+# ==========================================
+# IMPORT YOLO TRACKING ENGINE (WITH ERROR LOGGING)
+# ==========================================
+try:
+    from jarvis.ai.autonomy import start_tracking_loop, stop_tracking_loop
+    logger.info("YOLO Tracking Engine Loaded Successfully.")
+except Exception as e:
+    logger.error(f"CRITICAL: Failed to load YOLO Autonomy Engine: {e}")
+    logger.error("Please run: pip install ultralytics opencv-python")
+    def start_tracking_loop(): 
+        logger.error("Cannot start tracking: YOLO engine not loaded.")
+    def stop_tracking_loop(): 
+        pass
+
+# ==========================================
+# FILE PATHS & DIRECTORY SETUP
+# ==========================================
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../"))
+STATIC_DIR = os.path.join(ROOT_DIR, "static")
+TEMPLATES_DIR = os.path.join(ROOT_DIR, "templates")
+RECORDINGS_DIR = os.path.join(ROOT_DIR, "recordings")
+
+os.makedirs(STATIC_DIR, exist_ok=True)
+os.makedirs(TEMPLATES_DIR, exist_ok=True)
+os.makedirs(RECORDINGS_DIR, exist_ok=True)
+
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+templates = Jinja2Templates(directory=TEMPLATES_DIR)
+
+# ==========================================
+# CONFIGURATION FROM .ENV
+# ==========================================
+raw_esp_ip = os.getenv("ESP32_IP", "http://192.168.29.173").strip().rstrip("/")
+ESP32_IP = raw_esp_ip if raw_esp_ip.startswith("http") else f"http://{raw_esp_ip}"
+
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+if not GROQ_API_KEY:
+    logger.warning("GROQ_API_KEY is missing from the .env file!")
+
+groq_client = Groq(api_key=GROQ_API_KEY)
+
+CURRENT_LANGUAGE = os.getenv("DEFAULT_LANGUAGE", "en")
+AUTONOMOUS_MODE = False
+LAST_SPOKEN_TIME = 0.0
+PROACTIVE_COOLDOWN = 60.0 
+IS_SPEAKING = False
+HARD_MUTE = False
+
+# Video Recording State
+IS_RECORDING_VIDEO = False
+video_writer = None
+
+ACTIVE_TASK = None 
+BOSS_NAME = "Meet" 
+
+ACTIVITY_LOGS = []
+executor = ThreadPoolExecutor(max_workers=4)
+
+def add_log_event(event_text: str):
+    now = datetime.now()
+    ACTIVITY_LOGS.insert(0, {
+        "timestamp": now.isoformat(timespec="seconds"),
+        "event": event_text
+    })
+    if len(ACTIVITY_LOGS) > 50:
+        ACTIVITY_LOGS.pop()
+
+# ==========================================
+# ESP32 HARDWARE SYNC HELPERS
+# ==========================================
+def set_esp32_emotion(emotion: str):
+    if not ESP32_IP: return
+    try:
+        requests.get(f"{ESP32_IP}/emotion?type={emotion}", timeout=0.5)
+    except Exception:
+        pass
+
+def set_esp32_eyes(r: int, g: int, b: int):
+    if not ESP32_IP: return
+    try:
+        requests.get(f"{ESP32_IP}/eyes?r={r}&g={g}&b={b}", timeout=0.5)
+    except Exception:
+        pass
+
+def trigger_esp32_beep():
+    if not ESP32_IP: return
+    try:
+        requests.get(f"{ESP32_IP}/beep", timeout=0.5)
+    except Exception:
+        pass
+
+def force_stop_all():
+    global AUTONOMOUS_MODE, IS_SPEAKING, IS_RECORDING, AUDIO_BUFFER, HARD_MUTE, ACTIVE_TASK, IS_RECORDING_VIDEO, WAITING_FOR_WAKE_WORD
+    
+    if IS_RECORDING_VIDEO:
+        IS_RECORDING_VIDEO = False
+        
+    if AUTONOMOUS_MODE:
+        try:
+            stop_tracking_loop()
+        except Exception:
+            pass
+            
+    AUTONOMOUS_MODE = False
+    IS_SPEAKING = False
+    IS_RECORDING = False
+    HARD_MUTE = True
+    WAITING_FOR_WAKE_WORD = True
+    ACTIVE_TASK = None 
+    AUDIO_BUFFER.clear()
+    
+    try:
+        motion.execute_movement("stop", 0.0)
+    except Exception:
+        pass
+        
+    set_esp32_emotion("happy")
+    set_esp32_eyes(0, 255, 204)
+    add_log_event("SYSTEM HALTED BY USER")
+    time.sleep(0.5)
+    HARD_MUTE = False
+
+# ==========================================
+# WAKE WORD CALLBACK
+# ==========================================
+def on_wake_word_detected():
+    """Triggered by the PC microphone when 'Jarvis' is heard."""
+    global WAITING_FOR_WAKE_WORD, IS_RECORDING, AUDIO_BUFFER, SILENCE_START
+    if WAITING_FOR_WAKE_WORD:
+        logger.info("Wake word detected! Activating robot ears...")
+        WAITING_FOR_WAKE_WORD = False
+        IS_RECORDING = True
+        AUDIO_BUFFER.clear()
+        SILENCE_START = None
+        
+        trigger_esp32_beep()
+        set_esp32_emotion("listening")
+        set_esp32_eyes(255, 0, 0)
+
+# ==========================================
+# CORE AI MODULES
+# ==========================================
+vision_pipeline = VisionPipeline()
+vision_pipeline.start_stream()
+
+brain = JarvisBrain(vision_pipeline=vision_pipeline)
+motion = MotionController()
+cloud_manager = CloudManager()
+
+memory_manager = LongTermMemoryManager(persist_path="./jarvis_brain_db")
+try:
+    memory_manager.add_memory(
+        doc_id="profile_boss_meet",
+        text_content="The primary user is Meet, acting as the Boss/Sir. He is developing JARVIS MINI V1.",
+        metadata={"type": "profile", "timestamp": time.time()}
+    )
+except Exception:
+    pass
+
+# ==========================================
+# VIDEO RECORDING WORKER
+# ==========================================
+def record_video_worker():
+    global IS_RECORDING_VIDEO, video_writer
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    file_path = os.path.join(RECORDINGS_DIR, f"rec_{timestamp}.avi")
+    fourcc = cv2.VideoWriter_fourcc(*'XVID')
+    video_writer = None
+    
+    logger.info(f"Video recording started: {file_path}")
+    add_log_event(f"Started video recording: rec_{timestamp}.avi")
+
+    while IS_RECORDING_VIDEO:
+        frame = vision_pipeline.get_latest_frame()
+        if frame is not None:
+            if video_writer is None:
+                h, w, _ = frame.shape
+                video_writer = cv2.VideoWriter(file_path, fourcc, 20.0, (w, h))
+            video_writer.write(frame)
+        time.sleep(0.05)
+
+    if video_writer is not None:
+        video_writer.release()
+        video_writer = None
+        logger.info(f"Video successfully saved: {file_path}")
+        add_log_event(f"Saved video: rec_{timestamp}.avi")
+
+# ==========================================
+# REMOTE ROBOT AUDIO STREAMING (TCP PORT 82)
+# ==========================================
+def jarvis_speak(text: str):
+    global IS_SPEAKING, AUDIO_BUFFER, IS_RECORDING, HARD_MUTE, WAITING_FOR_WAKE_WORD
+    IS_SPEAKING = True
+    IS_RECORDING = False
+    HARD_MUTE = True 
+    AUDIO_BUFFER.clear() 
+    add_log_event(f"Jarvis spoke: {text[:40]}...")
+    set_esp32_emotion("happy")
+
+    temp_mp3 = f"temp_tts_{uuid.uuid4().hex}.mp3"
+    
+    try:
+        tld_code = "co.in" if CURRENT_LANGUAGE == "hi" else "co.uk"
+        tts = gTTS(text=text, lang=CURRENT_LANGUAGE, tld=tld_code)
+        tts.save(temp_mp3)
+
+        if AudioSegment is None:
+            return
+
+        audio = AudioSegment.from_mp3(temp_mp3)
+        audio = audio.set_frame_rate(16000).set_channels(2).set_sample_width(2)
+        audio = audio + 6 
+        
+        raw_pcm_data = audio.raw_data
+
+        ip = ESP32_IP.replace("http://", "").split(":")[0]
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(2.0)
+        s.connect((ip, 82))
+        
+        chunk_size = 1024
+        for i in range(0, len(raw_pcm_data), chunk_size):
+            chunk = raw_pcm_data[i:i+chunk_size]
+            if len(chunk) == chunk_size:
+                s.sendall(chunk)
+                
+        s.close()
+        
+    except Exception as e:
+        logger.error(f"Remote Audio Stream Error: {e}")
+    finally:
+        if os.path.exists(temp_mp3):
+            os.remove(temp_mp3)
+        time.sleep(0.5) 
+        AUDIO_BUFFER.clear() 
+        IS_SPEAKING = False
+        HARD_MUTE = False
+        WAITING_FOR_WAKE_WORD = True  # Return to sleep mode
+
+# ==========================================
+# ROBOT MICROPHONE STREAM & VAD
+# ==========================================
+AUDIO_BUFFER = []
+IS_RECORDING = False
+SILENCE_START = None
+SILENCE_THRESHOLD = 1500 
+SILENCE_DURATION = 1.0 
+PROCESSING_AUDIO = False
+
+WHISPER_HALLUCINATIONS = [
+    "james", "thank you", "subscribe", "amara.org", "thanks for watching", 
+    "i await your next command", "roll reversal", "homie", "home e", "blank",
+    "the camera feed is", "my sensors confirm", "okay", "alright", "jarvis dashboard",
+    "systems online", "डाशबोर्डिव", "जावेश", "local mural links", "currently unavailable",
+    "sir", "local networks"
+]
+
+def process_robot_audio():
+    global AUDIO_BUFFER, PROCESSING_AUDIO, WAITING_FOR_WAKE_WORD
+    PROCESSING_AUDIO = True
+    set_esp32_emotion("thinking")
+    
+    temp_wav = f"robot_mic_{uuid.uuid4().hex}.wav"
+    try:
+        if not AUDIO_BUFFER:
+            set_esp32_emotion("happy")
+            WAITING_FOR_WAKE_WORD = True
+            return
+
+        raw_data = b"".join(AUDIO_BUFFER)
+        AUDIO_BUFFER.clear()
+        
+        with wave.open(temp_wav, 'wb') as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(16000)
+            wav_file.writeframes(raw_data)
+            
+        with open(temp_wav, "rb") as f:
+            transcription = groq_client.audio.transcriptions.create(
+                file=("audio.wav", f.read()),
+                model="whisper-large-v3",
+                language=CURRENT_LANGUAGE 
+            )
+            
+        user_text = transcription.text.strip()
+        lower_text = user_text.lower()
+        
+        is_hallucination = any(h in lower_text for h in WHISPER_HALLUCINATIONS)
+        if not user_text or is_hallucination or len(user_text) < 4:
+            set_esp32_emotion("happy")
+            WAITING_FOR_WAKE_WORD = True
+            return
+
+        logger.info(f"Robot Heard: {user_text}")
+        add_log_event(f"Heard audio: '{user_text}'")
+        threading.Thread(target=process_command_and_speech, args=(user_text,)).start()
+            
+    except Exception as e:
+        logger.error(f"Robot Mic Error: {e}")
+        set_esp32_emotion("confused")
+        WAITING_FOR_WAKE_WORD = True
+    finally:
+        PROCESSING_AUDIO = False
+        if os.path.exists(temp_wav):
+            os.remove(temp_wav)
+
+@app.post("/api/robot_mic")
+async def robot_mic_stream(request: Request):
+    global AUDIO_BUFFER, IS_RECORDING, SILENCE_START, PROCESSING_AUDIO, IS_SPEAKING, HARD_MUTE, WAITING_FOR_WAKE_WORD
+    
+    if IS_SPEAKING or HARD_MUTE:
+        if IS_RECORDING:
+            IS_RECORDING = False
+        AUDIO_BUFFER.clear()
+        return {"status": "muted"}
+
+    if PROCESSING_AUDIO:
+        return {"status": "busy"}
+
+    if WAITING_FOR_WAKE_WORD:
+        # Silently drop the ESP32 audio chunks until the PC mic hears "Jarvis"
+        AUDIO_BUFFER.clear()
+        return {"status": "waiting_for_wake_word"}
+
+    chunk = await request.body()
+    if not chunk:
+        return {"status": "empty"}
+
+    audio_data = np.frombuffer(chunk, dtype=np.int16)
+    rms = np.sqrt(np.mean(np.square(audio_data, dtype=np.float32)))
+    
+    if IS_RECORDING and len(AUDIO_BUFFER) > 80: 
+        IS_RECORDING = False
+        SILENCE_START = None
+        threading.Thread(target=process_robot_audio, daemon=True).start()
+        return {"status": "ok"}
+
+    if rms > SILENCE_THRESHOLD:
+        if not IS_RECORDING:
+            IS_RECORDING = True
+            set_esp32_emotion("listening")
+        SILENCE_START = None
+        AUDIO_BUFFER.append(chunk)
+    elif IS_RECORDING:
+        AUDIO_BUFFER.append(chunk)
+        if SILENCE_START is None:
+            SILENCE_START = time.time()
+        elif time.time() - SILENCE_START > SILENCE_DURATION:
+            IS_RECORDING = False
+            SILENCE_START = None
+            threading.Thread(target=process_robot_audio, daemon=True).start()
+
+    return {"status": "ok"}
+
+# ==========================================
+# REASONING & LOCAL FALLBACK
+# ==========================================
+def fallback_to_ollama(user_message: str, language_mode: str, memory_context: str = "") -> str:
+    url = "http://localhost:11434/api/chat"
+    lang_instruction = "Respond natively in Hindi." if language_mode == "hi" else "Respond natively in English."
+    
+    payload = {
+        "model": "qwen2.5:3b",
+        "messages": [
+            {
+                "role": "system",
+                "content": f"You are JARVIS, an advanced AI assistant to your boss, {BOSS_NAME}. Be concise. {lang_instruction} {memory_context}"
+            },
+            {
+                "role": "user",
+                "content": f"Answer accurately in 1-2 sentences: {user_message}"
+            }
+        ],
+        "stream": False
+    }
+    
+    try:
+        response = requests.post(url, json=payload, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        return data.get("message", {}).get("content", "Neural link fallback active, sir.").strip()
+    except Exception as e:
+        logger.error(f"Ollama Fallback Error: {e}")
+        return brain.think(user_message, language_mode=language_mode)
+
+def get_groq_vision_response(user_message: str, language_mode: str = "en", is_proactive: bool = False) -> str:
+    set_esp32_emotion("thinking")
+    memory_context = ""
+    global ACTIVE_TASK
+    try:
+        try:
+            relevant_memory = memory_manager.query_memory(user_message, n_results=2)
+            memory_context = f"\nRelevant Past Memories: {relevant_memory}" if relevant_memory else ""
+        except Exception:
+            pass
+
+        frame = vision_pipeline.get_latest_frame()
+        if frame is None:
+            fallback_ans = brain.think(f"{memory_context}\nUser says: {user_message}", language_mode=language_mode)
+            set_esp32_emotion("happy")
+            return fallback_ans
+
+        _, buffer = cv2.imencode('.jpg', frame)
+        base64_image = base64.b64encode(buffer).decode('utf-8')
+        
+        task_context = f"\nCurrent Active Task: {ACTIVE_TASK}" if ACTIVE_TASK else ""
+
+        if is_proactive:
+            system_prompt = (
+                f"You are JARVIS, an AI robot assistant to your boss, {BOSS_NAME}. "
+                "Analyze the visual frame. "
+                f"If you see a human or {BOSS_NAME}, greet them warmly and politely in 1 short sentence. "
+                "If no person is in frame, output: 'NO_PERSON'."
+            )
+        else:
+            system_prompt = f"You are JARVIS, an advanced AI assistant to {BOSS_NAME}. {task_context}"
+
+        lang_instruction = "Respond natively in Hindi." if language_mode == "hi" else "Respond natively in English."
+
+        completion = groq_client.chat.completions.create(
+            model="qwen/qwen3.6-27b",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f"{system_prompt} {lang_instruction} {memory_context}\nUser says: {user_message}"
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{base64_image}"
+                            }
+                        }
+                    ]
+                }
+            ]
+        )
+        
+        answer = completion.choices[0].message.content
+        if "</think>" in answer:
+            answer = answer.split("</think>")[-1].strip()
+            
+        set_esp32_emotion("happy")
+        try:
+            memory_manager.add_memory(
+                doc_id=f"mem_{uuid.uuid4().hex[:8]}",
+                text_content=f"User asked: {user_message}. Jarvis answered: {answer}",
+                metadata={"language": language_mode, "timestamp": time.time()}
+            )
+        except Exception:
+            pass
+        return answer
+
+    except Exception as e:
+        if "429" in str(e) or "rate_limit_exceeded" in str(e).lower():
+            logger.warning("Groq Rate Limit Hit! Falling back to local Ollama.")
+            return fallback_to_ollama(user_message, language_mode, memory_context)
+        else:
+            logger.error(f"Groq Vision Error ({e}).")
+            return fallback_to_ollama(user_message, language_mode, memory_context)
+
+def process_command_and_speech(user_message: str) -> str:
+    global AUTONOMOUS_MODE, ACTIVE_TASK
+    try:
+        user_intent = user_message.lower()
+        user_words = user_intent.split()
+
+        if "stop" in user_intent or "halt" in user_intent:
+            force_stop_all()
+            msg = "सिस्टम रोक दिया गया है।" if CURRENT_LANGUAGE == "hi" else "All systems halted, sir."
+            jarvis_speak(msg)
+            return msg
+
+        if any(w in user_intent for w in ["start autonomy", "follow me", "hunt"]):
+            if not AUTONOMOUS_MODE:
+                AUTONOMOUS_MODE = True
+                threading.Thread(target=start_tracking_loop, daemon=True).start()
+                msg = "Autonomous tracking engaged, sir. Searching for targets."
+                jarvis_speak(msg)
+                return msg
+
+        if ACTIVE_TASK:
+            if any(w in user_intent for w in ["done", "complete", "finished", "stop task", "we are done", "leave it"]):
+                msg = f"Task '{ACTIVE_TASK}' marked as complete. Standing down, sir."
+                ACTIVE_TASK = None
+                jarvis_speak(msg)
+                return msg
+            else:
+                response_text = get_groq_vision_response(f"Continuing active task '{ACTIVE_TASK}': {user_message}", language_mode=CURRENT_LANGUAGE)
+                jarvis_speak(response_text)
+                return response_text
+
+        if "not now" in user_intent or any(w in user_words for w in ["no", "nah", "nope", "nahi"]):
+            msg = "Understood, sir. I will remain on standby."
+            jarvis_speak(msg)
+            return msg
+
+        if "help me with" in user_intent or "i need help" in user_intent or any(w in user_words for w in ["yes", "yeah", "sure"]):
+            ACTIVE_TASK = user_message
+            msg = "Task accepted, sir. I am fully engaged on this until complete."
+            jarvis_speak(msg)
+            return msg
+
+        if "red" in user_intent and ("eye" in user_intent or "face" in user_intent):
+            set_esp32_eyes(255, 0, 0)
+            try: motion.execute_eye_color(255, 0, 0)
+            except: pass
+            msg = "आँखों का रंग लाल कर दिया गया है।" if CURRENT_LANGUAGE == "hi" else "Setting optical array to red."
+            jarvis_speak(msg)
+            return msg
+            
+        elif "blue" in user_intent and ("eye" in user_intent or "face" in user_intent):
+            set_esp32_eyes(0, 150, 255)
+            try: motion.execute_eye_color(0, 150, 255)
+            except: pass
+            msg = "आँखों का रंग नीला कर दिया गया है।" if CURRENT_LANGUAGE == "hi" else "Setting optical array to blue."
+            jarvis_speak(msg)
+            return msg
+
+        tool_keywords = ["diagnostic", "cpu", "ram", "battery", "snapshot", "take a picture", "take photo", "scan", "distance", "obstacle", "system stat"]
+        if any(keyword in user_intent for keyword in tool_keywords):
+            response_text = brain.think(user_message, language_mode=CURRENT_LANGUAGE)
+            jarvis_speak(response_text)
+            return response_text
+
+        response_text = get_groq_vision_response(user_message, language_mode=CURRENT_LANGUAGE)
+        add_log_event("AI response generated")
+        sentences = re.split(r'(?<=[.!?])\s+', response_text)
+        for sentence in sentences:
+            if sentence.strip():
+                jarvis_speak(sentence.strip())
+        
+        return response_text
+
+    except Exception as e:
+        logger.error(f"Error in command execution: {e}")
+        return "Error."
+
+# ==========================================
+# PROACTIVE GROQ HUMAN GREETING DAEMON
+# ==========================================
+def proactive_vision_daemon():
+    global LAST_SPOKEN_TIME, ACTIVE_TASK, AUTONOMOUS_MODE, IS_SPEAKING
+    while True:
+        time.sleep(15)
+        try:
+            if ACTIVE_TASK or AUTONOMOUS_MODE or IS_SPEAKING: 
+                continue 
+                
+            frame = vision_pipeline.get_latest_frame()
+            if frame is not None:
+                now = time.time()
+                if (now - LAST_SPOKEN_TIME) > PROACTIVE_COOLDOWN:
+                    response = get_groq_vision_response(
+                        f"Check if {BOSS_NAME} or a person is present and greet them.", 
+                        language_mode=CURRENT_LANGUAGE,
+                        is_proactive=True
+                    )
+                    if response and len(response) > 4 and "no_person" not in response.lower() and "no person" not in response.lower():
+                        LAST_SPOKEN_TIME = now
+                        set_esp32_emotion("happy")
+                        set_esp32_eyes(0, 255, 128) 
+                        jarvis_speak(response)
+        except Exception:
+            pass
+
+def register_server_with_esp32():
+    if not ESP32_IP: return
+    while True:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(('10.255.255.255', 1))
+            laptop_ip = s.getsockname()[0]
+            s.close()
+            
+            url = f"{ESP32_IP}/set_server?ip={laptop_ip}"
+            response = requests.get(url, timeout=1.5)
+            if response.status_code == 200:
+                break  
+        except Exception:
+            pass
+        time.sleep(10)
+
+@app.get("/video_feed")
+def video_feed():
+    return StreamingResponse(
+        vision_pipeline.generate_mjpeg_stream(),
+        media_type="multipart/x-mixed-replace; boundary=frame"
+    )
+
+@app.get("/", response_class=HTMLResponse)
+async def dashboard(request: Request):
+    return templates.TemplateResponse(request=request, name="Dashboard.html", context={"active_page": "dashboard"})
+
+@app.get("/Camera", response_class=HTMLResponse)
+async def camera(request: Request):
+    return templates.TemplateResponse(request=request, name="Camera.html", context={"active_page": "camera"})
+    
+@app.get("/Security", response_class=HTMLResponse)
+async def security_page(request: Request):
+    return templates.TemplateResponse(request=request, name="Security.html", context={"active_page": "security"})
+
+@app.get("/api/snapshots")
+async def api_snapshots():
+    loop = asyncio.get_running_loop()
+    urls = await loop.run_in_executor(executor, lambda: cloud_manager.get_latest_snapshots(limit=24))
+    return {"status": "success", "snapshots": urls}
+
+@app.get("/Controls", response_class=HTMLResponse)
+async def controls(request: Request):
+    return templates.TemplateResponse(request=request, name="Controls.html", context={"active_page": "controls"})
+
+@app.get("/System", response_class=HTMLResponse)
+async def system(request: Request):
+    return templates.TemplateResponse(request=request, name="System.html", context={"active_page": "system"})
+
+@app.get("/settings", response_class=HTMLResponse)
+async def settings(request: Request):
+    return templates.TemplateResponse(request=request, name="Settings.html", context={"active_page": "settings"})
+
+@app.get("/logs", response_class=HTMLResponse)
+async def logs(request: Request):
+    return templates.TemplateResponse(request=request, name="Loges.html", context={"active_page": "logs"})
+
+class ControlCommand(BaseModel):
+    command: str = "unknown"
+
+class ChatRequest(BaseModel):
+    message: str
+    language: str = "en"
+
+class MoveRequest(BaseModel):
+    direction: str
+    duration: float = 1.0
+
+class EyeColorRequest(BaseModel):
+    hex_color: str
+
+class AutonomyRequest(BaseModel):
+    enabled: bool
+
+class LanguageRequest(BaseModel):
+    language: str
+
+@app.get("/api/robot-status")
+async def api_robot_status():
+    return {
+        "mode": "Autonomous" if AUTONOMOUS_MODE else "Manual",
+        "battery_percent": 84,
+        "charging": False,
+        "power_source": "Battery",
+        "speed": 0.6 if AUTONOMOUS_MODE else 0.0,
+        "uptime_seconds": time.time() - LAST_SPOKEN_TIME if LAST_SPOKEN_TIME > 0 else 5423,
+        "temperature_c": 38.5,
+    }
+
+@app.get("/api/sensor-data")
+async def api_sensor_data():
+    front_dist = 120
+    try:
+        loop = asyncio.get_running_loop()
+        front_dist = await asyncio.wait_for(
+            loop.run_in_executor(executor, motion.get_distance), 
+            timeout=0.5
+        )
+    except Exception:
+        front_dist = 120
+        
+    return {
+        "ultrasonic_cm": {"front": front_dist, "left": 45, "right": 200, "back": 80},
+        "gyroscope": {"x": 0.02, "y": -0.01, "z": 0.00},
+        "accelerometer": {"x": 0.00, "y": 0.01, "z": 9.81},
+    }
+
+@app.get("/api/system-stats")
+async def api_system_stats():
+    return {
+        "cpu_percent": psutil.cpu_percent(interval=None),
+        "memory_percent": psutil.virtual_memory().percent,
+        "network": {"status": "Connected", "latency_ms": random.randint(10, 30)},
+        "storage_percent": psutil.disk_usage('/').percent,
+    }
+
+@app.get("/api/activity-log")
+async def api_activity_log():
+    return ACTIVITY_LOGS
+
+@app.post("/api/control")
+async def api_control(payload: ControlCommand):
+    global AUTONOMOUS_MODE, IS_RECORDING_VIDEO
+    cmd = payload.command
+    add_log_event(f"Dashboard control: {cmd}")
+    
+    if cmd in ["forward", "backward", "left", "right", "stop"]:
+        if cmd == "stop":
+            force_stop_all()
+        else:
+            threading.Thread(target=motion.execute_movement, args=(cmd, 1.0), daemon=True).start()
+            
+    elif cmd == "screenshot":
+        threading.Thread(target=process_command_and_speech, args=("Take a security snapshot",), daemon=True).start()
+        
+    elif cmd == "record_start":
+        if not IS_RECORDING_VIDEO:
+            IS_RECORDING_VIDEO = True
+            threading.Thread(target=record_video_worker, daemon=True).start()
+            jarvis_speak("Video recording initialized.")
+        else:
+            IS_RECORDING_VIDEO = False
+            jarvis_speak("Video recording saved.")
+            
+    elif cmd == "record_stop":
+        if IS_RECORDING_VIDEO:
+            IS_RECORDING_VIDEO = False
+            jarvis_speak("Video recording saved.")
+            
+    elif "eye_color_" in cmd:
+        color_map = {
+            "eye_color_teal": (0, 255, 204),
+            "eye_color_pink": (255, 51, 102),
+            "eye_color_green": (0, 255, 102),
+            "eye_color_yellow": (255, 204, 0),
+            "eye_color_blue": (51, 153, 255),
+            "eye_color_purple": (204, 51, 255),
+            "eye_color_#00FFCC": (0, 255, 204),
+            "eye_color_#FF3366": (255, 51, 102),
+            "eye_color_#00FF66": (0, 255, 102),
+            "eye_color_#FFCC00": (255, 204, 0),
+            "eye_color_#3399FF": (51, 153, 255),
+            "eye_color_#CC33FF": (204, 51, 255),
+        }
+        rgb = color_map.get(cmd, (0, 255, 204))
+        set_esp32_eyes(rgb[0], rgb[1], rgb[2])
+        try: motion.execute_eye_color(rgb[0], rgb[1], rgb[2])
+        except: pass
+            
+    elif cmd == "autonomy_start":
+        if not AUTONOMOUS_MODE:
+            AUTONOMOUS_MODE = True
+            threading.Thread(target=start_tracking_loop, daemon=True).start()
+            jarvis_speak("Tracking engine online.")
+        else:
+            force_stop_all()
+            jarvis_speak("Tracking disabled.")
+            
+    elif cmd == "autonomy_stop":
+        force_stop_all()
+
+    return {"status": "ok", "received_command": payload.command}
+
+@app.post("/api/move")
+def api_move(req: MoveRequest):
+    try: result = motion.execute_movement(req.direction, req.duration)
+    except: result = False
+    return {"status": "success", "result": result}
+
+@app.post("/api/eyes")
+def api_eyes(req: EyeColorRequest):
+    hex_c = req.hex_color.lstrip('#')
+    r, g, b = int(hex_c[0:2], 16), int(hex_c[2:4], 16), int(hex_c[4:6], 16)
+    set_esp32_eyes(r, g, b)
+    try: result = motion.execute_eye_color(r, g, b)
+    except: result = False
+    return {"status": "success", "rgb": [r, g, b], "result": result}
+
+@app.post("/api/autonomy")
+def api_autonomy(req: AutonomyRequest):
+    global AUTONOMOUS_MODE
+    if req.enabled and not AUTONOMOUS_MODE:
+        AUTONOMOUS_MODE = True
+        threading.Thread(target=start_tracking_loop, daemon=True).start()
+    elif not req.enabled and AUTONOMOUS_MODE:
+        force_stop_all()
+    return {"status": "success", "autonomous_mode": AUTONOMOUS_MODE}
+
+@app.post("/api/language")
+def api_language(req: LanguageRequest):
+    global CURRENT_LANGUAGE
+    CURRENT_LANGUAGE = req.language
+    add_log_event(f"Language changed to: {req.language}")
+    return {"status": "success", "language": CURRENT_LANGUAGE}
+
+@app.post("/api/chat")
+def api_chat(req: ChatRequest):
+    global CURRENT_LANGUAGE
+    CURRENT_LANGUAGE = req.language
+    set_esp32_emotion("listening")
+    ai_response = process_command_and_speech(req.message)
+    return {"status": "success", "response": ai_response}
+
+@app.post("/api/stt")
+async def api_stt(audio: UploadFile = File(...)):
+    set_esp32_emotion("listening")
+    temp_audio = f"temp_stt_{uuid.uuid4().hex}.webm"
+    try:
+        with open(temp_audio, "wb") as f:
+            f.write(await audio.read())
+        with open(temp_audio, "rb") as f:
+            transcription = groq_client.audio.transcriptions.create(
+                file=("audio.webm", f.read()),
+                model="whisper-large-v3",
+                language=CURRENT_LANGUAGE 
+            )
+        return {"status": "success", "text": transcription.text}
+    except Exception:
+        set_esp32_emotion("confused")
+        return {"status": "error", "text": ""}
+    finally:
+        if os.path.exists(temp_audio): 
+            os.remove(temp_audio)
+
+def play_boot_sequence():
+    try:
+        add_log_event("System boot complete")
+        set_esp32_emotion("happy")
+        set_esp32_eyes(0, 255, 204)
+        time.sleep(2)
+        jarvis_speak("Systems online, boss. All tactical modules initialized. Awaiting your command.")
+    except Exception as e:
+        logger.error(f"Boot sequence error: {e}")
+
+if __name__ == "__main__":
+    import uvicorn
+    
+    # 1. Start Background ESP32 Registration
+    threading.Thread(target=register_server_with_esp32, daemon=True).start()
+    
+    # 2. Start Proactive Face Scanner
+    threading.Thread(target=proactive_vision_daemon, daemon=True).start()
+    
+    # 3. Start PC Wake Word Listener (if loaded successfully)
+    if LocalWakeWordListener:
+        wake_listener = LocalWakeWordListener(callback_function=on_wake_word_detected)
+        threading.Thread(target=wake_listener.start_listening, daemon=True).start()
+        
+    # 4. Announce boot up
+    threading.Thread(target=play_boot_sequence, daemon=True).start()
+    
+    # Run the main web server
+    uvicorn.run(app, host="0.0.0.0", port=8000)

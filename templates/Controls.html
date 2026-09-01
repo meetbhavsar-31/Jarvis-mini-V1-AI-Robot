@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %} — Controls{% endblock %}
+{% block content %}
+
+<div class="page-header">
+  <h2>Controls</h2>
+  <p class="page-subtitle">Manual drive controls + robot actions</p>
+</div>
+
+<div class="grid-controls">
+
+  <section class="card card-dpad">
+    <div class="card-header"><h3>Directional Control</h3></div>
+    <div class="dpad">
+      <button class="dpad-btn dpad-up" data-direction="forward" aria-label="Forward">&#9650;</button>
+      <button class="dpad-btn dpad-left" data-direction="left" aria-label="Left">&#9664;</button>
+      <button class="dpad-btn dpad-stop" data-direction="stop" aria-label="Stop">&#9632;</button>
+      <button class="dpad-btn dpad-right" data-direction="right" aria-label="Right">&#9654;</button>
+      <button class="dpad-btn dpad-down" data-direction="backward" aria-label="Backward">&#9660;</button>
+    </div>
+  </section>
+
+  <section class="card card-actions">
+    <div class="card-header"><h3>Robot Actions</h3></div>
+    <div class="action-btn-list">
+      <button class="btn btn-secondary" data-command="screenshot">Take Screenshot</button>
+      <button class="btn btn-secondary" id="controlsRecordBtn">Record Video</button>
+      <button class="btn btn-primary" id="controlsAutonomyBtn" data-command="autonomy_start">Start Autonomy</button>
+      <button class="btn btn-danger" data-command="stop">Stop Robot</button>
+    </div>
+  </section>
+
+</div>
+
+{% endblock %}

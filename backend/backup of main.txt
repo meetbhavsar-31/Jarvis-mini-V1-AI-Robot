@@ -1,0 +1,739 @@
+import cv2
+import re
+import os
+import time
+import uuid
+import base64
+import random
+import threading
+import socket
+import wave
+import numpy as np
+import requests
+import speech_recognition as sr
+from dotenv import load_dotenv
+from fastapi import FastAPI, Request, UploadFile, File
+from fastapi.responses import HTMLResponse, StreamingResponse
+from pydantic import BaseModel
+from groq import Groq
+
+from jarvis.common.logger import setup_logger
+from jarvis.ai.vision import VisionPipeline
+from jarvis.ai.brain import JarvisBrain
+from jarvis.audio.tts import GoogleSpeaker
+from jarvis.motion.motion_controller import MotionController
+from jarvis.memory.rag import LongTermMemoryManager
+
+# Load environment variables from the .env file in your root folder
+load_dotenv()
+
+logger = setup_logger()
+app = FastAPI(title="JARVIS MINI V2 - Master Tactical Dashboard")
+
+# ==========================================
+# CENTRALIZED CONFIGURATION & API KEYS
+# ==========================================
+ESP32_IP = os.getenv("ESP32_IP", "http://jarvis.local").rstrip("/")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+
+if not GROQ_API_KEY:
+    logger.warning("GROQ_API_KEY is missing from the .env file! Vision and Voice Recognition will fail.")
+
+groq_client = Groq(api_key=GROQ_API_KEY)
+
+# ==========================================
+# ESP32 DISPLAY HELPERS
+# ==========================================
+def set_esp32_emotion(emotion: str):
+    """Sends a non-blocking request to the ESP32 to change the face emotion."""
+    if not ESP32_IP: return
+    try:
+        requests.get(f"{ESP32_IP}/emotion?type={emotion}", timeout=0.8)
+    except Exception as e:
+        logger.debug(f"Could not reach ESP32 for emotion: {e}")
+
+def set_esp32_eyes(r: int, g: int, b: int):
+    """Sends a non-blocking request to the ESP32 to change the eye color."""
+    if not ESP32_IP: return
+    try:
+        requests.get(f"{ESP32_IP}/eyes?r={r}&g={g}&b={b}", timeout=0.8)
+    except Exception as e:
+        logger.debug(f"Could not reach ESP32 for eyes: {e}")
+
+# --------------------------------------------------------------------------
+# SYSTEM MODULES INITIALIZATION
+# --------------------------------------------------------------------------
+logger.info("Initializing JARVIS Core Systems...")
+vision_pipeline = VisionPipeline()
+vision_pipeline.start_stream() 
+
+brain = JarvisBrain()
+tts_en = GoogleSpeaker(lang="en", tld="co.uk")  
+tts_hi = GoogleSpeaker(lang="hi", tld="co.in")  
+motion = MotionController()
+memory_manager = LongTermMemoryManager(persist_path="./jarvis_brain_db")
+
+CURRENT_LANGUAGE = "en"  
+
+def get_current_tts():
+    return tts_hi if CURRENT_LANGUAGE == "hi" else tts_en
+
+# --------------------------------------------------------------------------
+# GLOBAL STATE & TELEMETRY
+# --------------------------------------------------------------------------
+AUTONOMOUS_MODE = False
+LAST_SPOKEN_TIME = 0.0
+PROACTIVE_COOLDOWN = 30.0 
+IS_SPEAKING = False  # <--- NEW: Prevents Jarvis from hearing himself
+
+def jarvis_speak(text: str):
+    """Wrapper function to mute the mic while Jarvis speaks to prevent echo loops."""
+    global IS_SPEAKING
+    IS_SPEAKING = True
+    try:
+        get_current_tts().speak(text)
+    except Exception as e:
+        logger.error(f"TTS Error: {e}")
+    finally:
+        time.sleep(0.5) # Wait half a second for room echoes to fade
+        IS_SPEAKING = False
+
+# ==========================================
+# ROBOT MIC - VAD (Voice Activity Detection)
+# ==========================================
+AUDIO_BUFFER = []
+IS_RECORDING = False
+SILENCE_START = None
+SILENCE_THRESHOLD = 300
+SILENCE_DURATION = 1.5   
+PROCESSING_AUDIO = False
+
+def process_robot_audio():
+    global AUDIO_BUFFER, PROCESSING_AUDIO
+    PROCESSING_AUDIO = True
+    set_esp32_emotion("thinking")
+    
+    temp_wav = f"robot_mic_{uuid.uuid4().hex}.wav"
+    try:
+        raw_data = b"".join(AUDIO_BUFFER)
+        AUDIO_BUFFER.clear()
+        
+        with wave.open(temp_wav, 'wb') as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2) 
+            wav_file.setframerate(16000)
+            wav_file.writeframes(raw_data)
+            
+        with open(temp_wav, "rb") as f:
+            transcription = groq_client.audio.transcriptions.create(
+                file=("audio.wav", f.read()),
+                model="whisper-large-v3",
+                language=CURRENT_LANGUAGE  
+            )
+            
+        user_text = transcription.text.strip()
+        if user_text:
+            logger.info(f"Robot Heard: {user_text}")
+            threading.Thread(target=process_voice_and_chat, args=(user_text, None)).start()
+        else:
+            set_esp32_emotion("happy") 
+            
+    except Exception as e:
+        logger.error(f"Robot Mic Processing Error: {e}")
+        set_esp32_emotion("confused")
+    finally:
+        PROCESSING_AUDIO = False
+        if os.path.exists(temp_wav):
+            os.remove(temp_wav)
+
+@a@app.post("/api/robot_mic")
+async def robot_mic_stream(request: Request):
+    global AUDIO_BUFFER, IS_RECORDING, SILENCE_START, PROCESSING_AUDIO, IS_SPEAKING
+    
+    # Drop audio chunks if Jarvis is talking so he doesn't hear himself
+    if IS_SPEAKING:
+        if IS_RECORDING:
+            IS_RECORDING = False
+            AUDIO_BUFFER.clear()
+        return {"status": "muted_while_speaking"}
+
+    if PROCESSING_AUDIO:
+        return {"status": "busy"}
+
+    chunk = await request.body()
+    if not chunk:
+        return {"status": "empty"}
+
+    audio_data = np.frombuffer(chunk, dtype=np.int16)
+    rms = np.sqrt(np.mean(np.square(audio_data, dtype=np.float32)))
+    
+    # --- NEW FAILSAFE: Force stop if recording goes on too long (approx 5 seconds) ---
+    if IS_RECORDING and len(AUDIO_BUFFER) > 150: 
+        logger.warning("Max recording time reached! Forcing process...")
+        IS_RECORDING = False
+        SILENCE_START = None
+        threading.Thread(target=process_robot_audio, daemon=True).start()
+        return {"status": "ok"}
+    # ---------------------------------------------------------------------------------
+
+    if rms > SILENCE_THRESHOLD:
+        if not IS_RECORDING:
+            IS_RECORDING = True
+            set_esp32_emotion("listening")
+            logger.info("Voice detected, recording...")
+        SILENCE_START = None
+        AUDIO_BUFFER.append(chunk)
+    elif IS_RECORDING:
+        AUDIO_BUFFER.append(chunk)
+        if SILENCE_START is None:
+            SILENCE_START = time.time()
+        elif time.time() - SILENCE_START > SILENCE_DURATION:
+            IS_RECORDING = False
+            SILENCE_START = None
+            threading.Thread(target=process_robot_audio, daemon=True).start()
+
+    return {"status": "ok"}
+# --------------------------------------------------------------------------
+# PYDANTIC SCHEMAS
+# --------------------------------------------------------------------------
+class MoveRequest(BaseModel):
+    direction: str
+    duration: float = 1.0
+
+class ChatRequest(BaseModel):
+    message: str
+    language: str = "en"
+
+class EyeColorRequest(BaseModel):
+    hex_color: str
+
+class AutonomyRequest(BaseModel):
+    enabled: bool
+
+class LanguageRequest(BaseModel):
+    language: str
+
+# --------------------------------------------------------------------------
+# MULTIMODAL GROQ VISION HELPER (WITH RAG MEMORY INTEGRATION)
+# --------------------------------------------------------------------------
+def get_groq_vision_response(user_message: str) -> str:
+    set_esp32_emotion("thinking")
+    try:
+        relevant_memory = memory_manager.query_memory(user_message, n_results=2)
+        memory_context = f"\nRelevant Past Memories: {relevant_memory}" if relevant_memory else ""
+
+        frame = vision_pipeline.get_latest_frame()
+        if frame is None:
+            fallback_ans = brain.think(f"{memory_context}\nUser says: {user_message}", language_mode=CURRENT_LANGUAGE)
+            set_esp32_emotion("happy")
+            return fallback_ans
+
+        _, buffer = cv2.imencode('.jpg', frame)
+        base64_image = base64.b64encode(buffer).decode('utf-8')
+
+        lang_instruction = "Respond in Hindi." if CURRENT_LANGUAGE == "hi" else "Respond in English."
+
+        completion = groq_client.chat.completions.create(
+            model="qwen/qwen3.6-27b",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f"You are JARVIS, an advanced AI robot assistant. {lang_instruction} {memory_context}\nAnswer the user prompt considering what you see in the image feed. User says: {user_message}"
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{base64_image}"
+                            }
+                        }
+                    ]
+                }
+            ]
+        )
+        
+        answer = completion.choices[0].message.content
+        if "</think>" in answer:
+            answer = answer.split("</think>")[-1].strip()
+        set_esp32_emotion("happy")
+
+        memory_manager.add_memory(
+            doc_id=f"mem_{uuid.uuid4().hex[:8]}",
+            text_content=f"User asked: {user_message}. Jarvis answered: {answer}",
+            metadata={"language": CURRENT_LANGUAGE, "timestamp": time.time()}
+        )
+
+        return answer
+    except Exception as e:
+        logger.error(f"Groq Vision Error: {e}")
+        fallback_ans = brain.think(user_message, language_mode=CURRENT_LANGUAGE)
+        set_esp32_emotion("happy")
+        return fallback_ans
+
+# --------------------------------------------------------------------------
+# BACKGROUND DAEMONS (AUTONOMY, VISION, WAKE WORD)
+# --------------------------------------------------------------------------
+def proactive_vision_daemon():
+    global LAST_SPOKEN_TIME
+    logger.info("Advanced Event-Driven Proactive Daemon online.")
+    
+    last_distance_state = "clear"
+    
+    while True:
+        time.sleep(2)
+        try:
+            now = time.time()
+            distance = motion.get_distance()
+            
+            if 0 < distance < 30 and last_distance_state == "clear":
+                last_distance_state = "blocked"
+                if (now - LAST_SPOKEN_TIME) > PROACTIVE_COOLDOWN:
+                    LAST_SPOKEN_TIME = now
+                    logger.info("Proactive Event: Obstacle proximity detected.")
+                    set_esp32_emotion("surprised")
+                    set_esp32_eyes(255, 100, 0)
+                    jarvis_speak("Caution, sir. An obstacle has entered my immediate proximity.")
+                    continue
+            elif distance >= 30:
+                last_distance_state = "clear"
+
+            frame = vision_pipeline.get_latest_frame()
+            if frame is not None and (now - LAST_SPOKEN_TIME) > PROACTIVE_COOLDOWN:
+                LAST_SPOKEN_TIME = now
+                set_esp32_emotion("happy")
+                set_esp32_eyes(0, 255, 128)
+                response = get_groq_vision_response("A person or environment change is detected. Greet them happily with a smile as JARVIS.")
+                jarvis_speak(response)
+        except Exception as e:
+            pass
+
+def autonomous_navigation_loop():
+    global AUTONOMOUS_MODE
+    logger.info("True Autonomous Wander & Patrol Loop online.")
+    
+    while True:
+        if AUTONOMOUS_MODE:
+            try:
+                distance = motion.get_distance()
+                if 0 < distance < 25:
+                    set_esp32_emotion("angry")
+                    set_esp32_eyes(255, 0, 0)
+                    motion.execute_movement("backward", 1.0)
+                    escape_dir = random.choice(["left", "right"])
+                    motion.execute_movement(escape_dir, 0.8)
+                    time.sleep(0.5)
+                else:
+                    set_esp32_emotion("happy")
+                    set_esp32_eyes(0, 255, 204)
+                    motion.execute_movement("forward", 0.8)
+            except Exception as e:
+                logger.error(f"Patrol Loop Error: {e}")
+        time.sleep(0.3)
+
+def wake_word_listener():
+    logger.info("Wake Word Listener online. Say 'Hey Jarvis' to activate.")
+    recognizer = sr.Recognizer()
+    mic = sr.Microphone()
+    
+    with mic as source:
+        recognizer.adjust_for_ambient_noise(source, duration=1)
+    
+    while True:
+        try:
+            if IS_SPEAKING:
+                time.sleep(1)
+                continue
+                
+            with mic as source:
+                audio = recognizer.listen(source, phrase_time_limit=5)
+            
+            text = recognizer.recognize_google(audio).lower()
+            logger.info(f"Heard Background: {text}")
+            
+            if "jarvis" in text:
+                threading.Thread(target=process_voice_and_chat, args=(text, None)).start()
+        except sr.UnknownValueError:
+            pass 
+        except Exception as e:
+            time.sleep(1)
+
+# --------------------------------------------------------------------------
+# VOICE COMMAND PROCESSOR (OVERRIDE, EYES, EMOTIONS, & MOVEMENT)
+# --------------------------------------------------------------------------
+def process_voice_and_chat(user_message: str, response_text: str = None):
+    global AUTONOMOUS_MODE
+    try:
+        user_intent = user_message.lower()
+        
+        # 1. Voice Overrides for Autonomous Mode
+        movement_words = ["explore", "forward", "backward", "back", "left", "right", "stop", "halt"]
+        if any(word in user_intent for word in movement_words):
+            if AUTONOMOUS_MODE:
+                logger.info("Voice Override: Disabling Autonomous Mode for manual movement.")
+                AUTONOMOUS_MODE = False
+                set_esp32_emotion("happy") # Reset the face to normal if it was angry/patrolling
+                set_esp32_eyes(0, 255, 204)
+                
+        if "patrol" in user_intent or "start autonomy" in user_intent or "enable autonomous" in user_intent:
+            logger.info("Voice Command: Enabling Autonomous Mode.")
+            AUTONOMOUS_MODE = True
+            jarvis_speak("Initiating autonomous wander and patrol protocol, sir.")
+            return
+
+        # 2. Custom Voice Triggers for Eyes and Face
+        if "red eyes" in user_intent or "eyes to red" in user_intent or "change face to red" in user_intent:
+            set_esp32_eyes(255, 0, 0)
+            motion.execute_eye_color(255, 0, 0)
+            jarvis_speak("Setting optical array to red, sir.")
+            return
+        elif "blue eyes" in user_intent or "eyes to blue" in user_intent or "change face to blue" in user_intent:
+            set_esp32_eyes(0, 150, 255)
+            motion.execute_eye_color(0, 150, 255)
+            jarvis_speak("Setting optical array to blue.")
+            return
+        elif "green eyes" in user_intent or "eyes to green" in user_intent or "change face to green" in user_intent:
+            set_esp32_eyes(0, 255, 100)
+            motion.execute_eye_color(0, 255, 100)
+            jarvis_speak("Optical array set to green.")
+            return
+        elif "cyan eyes" in user_intent or "default eyes" in user_intent:
+            set_esp32_eyes(0, 255, 204)
+            motion.execute_eye_color(0, 255, 204)
+            jarvis_speak("Resetting optical array to standard cyan.")
+            return
+        elif "angry face" in user_intent or "look angry" in user_intent:
+            set_esp32_emotion("angry")
+            set_esp32_eyes(255, 0, 0)
+            jarvis_speak("Combat status displayed.")
+            return
+        elif "happy face" in user_intent or "smile" in user_intent:
+            set_esp32_emotion("happy")
+            set_esp32_eyes(0, 255, 204)
+            jarvis_speak("Glad to assist you, sir.")
+            return
+        
+        # 3. Direct Movement Execution
+        if "forward" in user_intent or "move ahead" in user_intent:
+            threading.Thread(target=motion.execute_movement, args=("forward", 2.0)).start()
+        elif "backward" in user_intent or "back" in user_intent:
+            threading.Thread(target=motion.execute_movement, args=("backward", 2.0)).start()
+        elif "left" in user_intent:
+            threading.Thread(target=motion.execute_movement, args=("left", 1.0)).start()
+        elif "right" in user_intent:
+            threading.Thread(target=motion.execute_movement, args=("right", 1.0)).start()
+        elif "stop" in user_intent or "halt" in user_intent:
+            threading.Thread(target=motion.execute_movement, args=("stop", 0.0)).start()
+            set_esp32_emotion("happy") # Force reset face on stop command
+            set_esp32_eyes(0, 255, 204)
+            jarvis_speak("Stopping all motors.")
+            return
+
+        # 4. Multimodal AI Response & Speech Output
+        if not response_text:
+            response_text = get_groq_vision_response(user_message)
+            
+        sentences = re.split(r'(?<=[.!?])\s+', response_text)
+        for sentence in sentences:
+            if sentence.strip():
+                jarvis_speak(sentence.strip())
+
+    except Exception as e:
+        logger.error(f"Error in Voice/Chat execution: {e}")
+
+@app.post("/api/chat")
+def api_chat(req: ChatRequest):
+    global CURRENT_LANGUAGE
+    CURRENT_LANGUAGE = req.language
+    set_esp32_emotion("listening")
+    
+    response_text = get_groq_vision_response(req.message)
+    threading.Thread(target=process_voice_and_chat, args=(req.message, response_text)).start()
+    return {"status": "success", "response": response_text}
+
+# --------------------------------------------------------------------------
+# GROQ STT (SPEECH-TO-TEXT) ENDPOINT
+# --------------------------------------------------------------------------
+@app.post("/api/stt")
+async def api_stt(audio: UploadFile = File(...)):
+    set_esp32_emotion("listening")
+    temp_audio = f"temp_stt_{uuid.uuid4().hex}.webm"
+    try:
+        with open(temp_audio, "wb") as f:
+            f.write(await audio.read())
+        
+        with open(temp_audio, "rb") as f:
+            transcription = groq_client.audio.transcriptions.create(
+                file=("audio.webm", f.read()),
+                model="whisper-large-v3",
+                language=CURRENT_LANGUAGE
+            )
+            
+        return {"status": "success", "text": transcription.text}
+    except Exception as e:
+        set_esp32_emotion("confused")
+        logger.error(f"Groq STT Error: {e}")
+        return {"status": "error", "text": ""}
+    finally:
+        if os.path.exists(temp_audio):
+            os.remove(temp_audio)
+
+# --------------------------------------------------------------------------
+# WEB INTERFACE (HTML/CSS/JS)
+# --------------------------------------------------------------------------
+@app.get("/", response_class=HTMLResponse)
+def index(request: Request):
+    html_content = """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <title>JARVIS MINI V2 - Master Tactical Dashboard</title>
+        <style>
+            body { background-color: #0d1117; color: #c9d1d9; font-family: 'Consolas', monospace; margin: 0; padding: 20px; }
+            h1, h2 { color: #58a6ff; text-align: center; margin-bottom: 20px; }
+            .container { display: flex; flex-wrap: wrap; gap: 20px; justify-content: center; }
+            .panel { background-color: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 15px; width: 480px; }
+            .video-container img { width: 100%; border-radius: 6px; border: 1px solid #30363d; }
+            .btn-matrix { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; max-width: 240px; margin: 10px auto; }
+            button { background: #21262d; color: #58a6ff; border: 1px solid #30363d; padding: 12px; font-weight: bold; font-size: 16px; border-radius: 6px; cursor: pointer; }
+            button:hover { background: #30363d; color: #79c0ff; }
+            .stop-btn { background: #8b0000; color: white; }
+            .stop-btn:hover { background: #ff0000; }
+            .mic-btn { background: #1f6feb; color: white; }
+            .mic-btn.listening { background: #da3633; animation: pulse 1.5s infinite; }
+            @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
+            .color-picker { display: flex; justify-content: center; gap: 10px; margin-top: 10px; }
+            .dot { width: 30px; height: 30px; border-radius: 50%; cursor: pointer; border: 2px solid white; }
+            #chat-box { height: 180px; overflow-y: auto; background: #0d1117; border: 1px solid #30363d; padding: 10px; border-radius: 6px; margin-bottom: 10px; font-size: 13px; }
+            .chat-input { display: flex; gap: 10px; }
+            .chat-input input { flex: 1; padding: 10px; background: #0d1117; border: 1px solid #30363d; color: white; border-radius: 6px; }
+            .auto-toggle { width: 100%; background: #2ea44f; color: white; margin-top: 15px; padding: 14px; font-size: 14px; }
+            .auto-toggle.active { background: #da3633; }
+            .lang-switch { display: flex; justify-content: center; gap: 10px; margin-bottom: 15px; }
+            .lang-btn { flex: 1; padding: 8px; font-size: 12px; background: #21262d; border: 1px solid #30363d; color: white; }
+            .lang-btn.active { background: #1f6feb; border-color: #58a6ff; }
+        </style>
+    </head>
+    <body>
+        <h1>JARVIS MINI V2 — MASTER TACTICAL DASHBOARD</h1>
+        <div class="container">
+            
+            <div class="panel video-container">
+                <h2>LIVE VISION STREAM</h2>
+                <img src="/video_feed" alt="Live Stream">
+            </div>
+
+            <div class="panel">
+                <h2>LANGUAGE SELECTION</h2>
+                <div class="lang-switch">
+                    <button id="langEn" class="lang-btn active" onclick="setLanguage('en')">🇬🇧 ENGLISH</button>
+                    <button id="langHi" class="lang-btn" onclick="setLanguage('hi')">🇮🇳 HINDI (हिंदी)</button>
+                </div>
+
+                <h2>HARDWARE OVERRIDE</h2>
+                <div class="btn-matrix">
+                    <div></div>
+                    <button onclick="sendMove('forward')">▲</button>
+                    <div></div>
+                    <button onclick="sendMove('left')">◄</button>
+                    <button class="stop-btn" onclick="sendMove('stop')">■</button>
+                    <button onclick="sendMove('right')">►</button>
+                    <div></div>
+                    <button onclick="sendMove('backward')">▼</button>
+                    <div></div>
+                </div>
+
+                <button id="autoBtn" class="auto-toggle" onclick="toggleAutonomy()">ENABLE AUTONOMOUS MODE</button>
+
+                <h2 style="margin-top:20px;">ROBOT EYES COLOR</h2>
+                <div class="color-picker">
+                    <div class="dot" style="background:#00FFCC" onclick="changeEyeColor('#00FFCC')"></div>
+                    <div class="dot" style="background:#FF3366" onclick="changeEyeColor('#FF3366')"></div>
+                    <div class="dot" style="background:#00FF66" onclick="changeEyeColor('#00FF66')"></div>
+                    <div class="dot" style="background:#FFCC00" onclick="changeEyeColor('#FFCC00')"></div>
+                    <div class="dot" style="background:#3399FF" onclick="changeEyeColor('#3399FF')"></div>
+                    <div class="dot" style="background:#CC33FF" onclick="changeEyeColor('#CC33FF')"></div>
+                </div>
+
+                <h2 style="margin-top:20px;">AI ASSISTANT TERMINAL</h2>
+                <div id="chat-box">SYSTEM: Web tactical dashboard online.<br></div>
+                <div class="chat-input">
+                    <input type="text" id="userInput" placeholder="Ask JARVIS something..." onkeydown="if(event.key==='Enter') sendChat()">
+                    <button id="micBtn" class="mic-btn" onclick="toggleSpeechRecognition()" title="Click to record via Groq STT">🎤</button>
+                    <button onclick="sendChat()">Send</button>
+                </div>
+            </div>
+
+        </div>
+
+        <script>
+            let mediaRecorder;
+            let audioChunks = [];
+            let isListening = false;
+            let autoMode = false;
+            let currentLang = 'en';
+
+            function setLanguage(lang) {
+                currentLang = lang;
+                document.getElementById('langEn').classList.toggle('active', lang === 'en');
+                document.getElementById('langHi').classList.toggle('active', lang === 'hi');
+
+                fetch('/api/language', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({language: lang})
+                });
+            }
+
+            async function toggleSpeechRecognition() {
+                if (isListening) {
+                    mediaRecorder.stop();
+                    stopListeningAnimation();
+                    return;
+                }
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    mediaRecorder = new MediaRecorder(stream);
+                    audioChunks = [];
+                    mediaRecorder.ondataavailable = event => { audioChunks.push(event.data); };
+                    mediaRecorder.onstop = async () => {
+                        const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                        const formData = new FormData();
+                        formData.append("audio", audioBlob, "speech.webm");
+                        document.getElementById('userInput').value = "Processing audio with Groq...";
+                        try {
+                            const response = await fetch('/api/stt', { method: 'POST', body: formData });
+                            const data = await response.json();
+                            if (data.text) {
+                                document.getElementById('userInput').value = data.text;
+                                sendChat(); 
+                            } else {
+                                document.getElementById('userInput').value = "";
+                                alert("Audio was empty or not understood.");
+                            }
+                        } catch (e) {
+                            console.error(e);
+                            document.getElementById('userInput').value = "Error contacting Groq API.";
+                        }
+                        stream.getTracks().forEach(track => track.stop());
+                    };
+                    mediaRecorder.start();
+                    startListeningAnimation();
+                } catch (err) {
+                    alert("Microphone access denied.");
+                }
+            }
+
+            function startListeningAnimation() {
+                isListening = true;
+                const btn = document.getElementById('micBtn');
+                btn.classList.add('listening');
+                btn.innerText = "⏹";
+            }
+
+            function stopListeningAnimation() {
+                isListening = false;
+                const btn = document.getElementById('micBtn');
+                btn.classList.remove('listening');
+                btn.innerText = "🎤";
+            }
+
+            function toggleAutonomy() {
+                autoMode = !autoMode;
+                const btn = document.getElementById('autoBtn');
+                btn.innerText = autoMode ? "DISABLE AUTONOMOUS MODE" : "ENABLE AUTONOMOUS MODE";
+                if (autoMode) { btn.classList.add('active'); } 
+                else { btn.classList.remove('active'); }
+                fetch('/api/autonomy', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({enabled: autoMode})
+                });
+            }
+
+            function sendMove(dir) {
+                fetch('/api/move', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({direction: dir, duration: 1.0})
+                });
+            }
+
+            function changeEyeColor(hex) {
+                fetch('/api/eyes', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({hex_color: hex})
+                });
+            }
+
+            function sendChat() {
+                const input = document.getElementById('userInput');
+                const chatBox = document.getElementById('chat-box');
+                const text = input.value.trim();
+                if(!text) return;
+
+                chatBox.innerHTML += `<b>You:</b> ${text}<br>`;
+                input.value = '';
+                chatBox.scrollTop = chatBox.scrollHeight;
+
+                fetch('/api/chat', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({message: text, language: currentLang})
+                })
+                .then(res => res.json())
+                .then(data => {
+                    chatBox.innerHTML += `<b style="color:#58a6ff;">JARVIS:</b> ${data.response}<br><br>`;
+                    chatBox.scrollTop = chatBox.scrollHeight;
+                });
+            }
+        </script>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
+
+def register_server_with_esp32():
+    """Finds the laptop's local IP and tells the ESP32 where to send audio, retrying until successful."""
+    if not ESP32_IP: return
+    
+    while True:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(('10.255.255.255', 1))
+            laptop_ip = s.getsockname()[0]
+            s.close()
+            
+            url = f"{ESP32_IP}/set_server?ip={laptop_ip}"
+            logger.info(f"Attempting to register Audio Server at {url} ...")
+            
+            response = requests.get(url, timeout=2)
+            
+            if response.status_code == 200:
+                # REMOVED THE EMOJI HERE SO WINDOWS DOESN'T CRASH
+                logger.info(f"[SUCCESS] Registered Audio Server with ESP32 at {laptop_ip}")
+                break  # Exit the loop! We are connected.
+            else:
+                logger.warning(f"ESP32 returned status {response.status_code}. Retrying in 5 seconds...")
+                
+        except Exception as e:
+            logger.error(f"ESP32 Network Error / Timeout. Is the robot on? Retrying in 5 seconds...")
+        
+        # Wait 5 seconds before trying again
+        time.sleep(5)
+# --------------------------------------------------------------------------
+# THREAD LAUNCHER & MAIN ENTRYPOINT
+# --------------------------------------------------------------------------
+if __name__ == "__main__":
+    import uvicorn
+
+    threading.Thread(target=register_server_with_esp32, daemon=True).start()
+    threading.Thread(target=jarvis_speak, args=("Systems online. Jarvis is ready, sir.",), daemon=True).start()
+    threading.Thread(target=proactive_vision_daemon, daemon=True).start()
+    threading.Thread(target=autonomous_navigation_loop, daemon=True).start()
+    threading.Thread(target=wake_word_listener, daemon=True).start()
+
+    uvicorn.run(app, host="0.0.0.0", port=8000)

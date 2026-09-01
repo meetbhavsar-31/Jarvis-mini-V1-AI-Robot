@@ -20,3 +20,7 @@ memory/logs/
 
 # Secrets
 .env
+
+# Ignore temporary audio files
+temp_tts_*.wav
+*.wav
