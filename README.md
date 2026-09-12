@@ -1,4 +1,4 @@
-# 🤖 JARVIS MINI V2 — Master Tactical AI Robot
+# 🤖 JARVIS MINI V1 — Master Tactical AI Robot
 
 <div align="center">
 
@@ -36,7 +36,7 @@
 
 ## 🌟 Project Overview
 
-**JARVIS MINI V2** is a modular robotics platform that bridges embedded hardware (ESP32 / ESP32-CAM) with cloud and local AI. The central server is written in **FastAPI** and provides:
+**JARVIS MINI V1** is a modular robotics platform that bridges embedded hardware (ESP32 / ESP32-CAM) with cloud and local AI. The central server is written in **FastAPI** and provides:
 
 - **Live MJPEG camera streaming** and a web dashboard for full manual/voice/autonomous control.
 - **Natural language interaction** in English and Hindi, powered by Groq (primary), Gemini (vision fallback), and Ollama (local offline fallback).
