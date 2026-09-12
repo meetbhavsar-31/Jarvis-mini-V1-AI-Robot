@@ -1,81 +1,149 @@
 import os
 import time
-import urllib.request
-import numpy as np
+import threading
 import requests
-import cv2
 from dotenv import load_dotenv
-from ultralytics import YOLO
+from jarvis.common.logger import setup_logger
 
 load_dotenv()
+logger = setup_logger()
 
-# Extract IPs
-esp32_ip = os.getenv("ESP32_IP", "http://192.168.29.173").rstrip("/")
-ROBOT_CONTROL_URL = f"{esp32_ip}/move?dir="
-cam_stream_url = os.getenv("ESP32_CAM_STREAM_URL", "http://192.168.29.175/stream")
-CAMERA_URL = cam_stream_url.replace("/stream", "/cam-hi.jpg") if "/stream" in cam_stream_url else f"{cam_stream_url.rstrip('/')}/cam-hi.jpg"
+# FIX: previously esp32_ip/ROBOT_CONTROL_URL/DISTANCE_URL were computed ONCE
+# at import time from the .env value and never touched again. If this module
+# is used alongside the app.py Settings page (which now lets you update the
+# robot's IP live, without restarting), this module would silently keep
+# talking to the OLD IP forever. _esp32_ip() now re-reads the current value
+# every call, so it stays in sync with whatever app.py's ESP32_IP currently
+# is if you wire this module to read from there (see note at bottom), or at
+# minimum re-reads the environment each time.
+_raw_esp_ip = os.getenv("ESP32_IP", "http://192.168.29.173").rstrip("/")
+_DEFAULT_ESP32_IP = _raw_esp_ip if _raw_esp_ip.startswith("http") else f"http://{_raw_esp_ip}"
 
-TRACKING_ACTIVE = False
+# Allows an external caller (e.g. app.py) to override the target IP at
+# runtime, e.g.: import jarvis.motion.autonomy as autonomy; autonomy.set_esp32_ip(new_ip)
+_current_esp32_ip = _DEFAULT_ESP32_IP
 
-# Load YOLO model
-try:
-    model = YOLO("yolov8n.pt")
-except Exception as e:
-    print(f"YOLO Load Error: {e}")
 
-def get_frame_from_esp32():
-    try:
-        req = urllib.request.Request(CAMERA_URL, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=1.5) as img_resp:
-            imgnp = np.array(bytearray(img_resp.read()), dtype=np.uint8)
-            return cv2.imdecode(imgnp, cv2.IMREAD_COLOR)
-    except Exception:
-        return None
+def set_esp32_ip(ip: str):
+    """Call this whenever the robot's IP changes (e.g. from the Settings page)."""
+    global _current_esp32_ip
+    ip = ip.strip()
+    if not ip:
+        return
+    _current_esp32_ip = ip if ip.startswith("http") else f"http://{ip}"
+    logger.info(f"[AUTONOMY] ESP32 target IP updated to: {_current_esp32_ip}")
+
+
+def _move_url(direction: str) -> str:
+    return f"{_current_esp32_ip}/move?dir={direction.lower()}"
+
+
+def _distance_url() -> str:
+    return f"{_current_esp32_ip}/distance"
+
+
+# FIX: use a threading.Event instead of a bare bool. Functionally similar
+# under the GIL for this simple case, but makes start/stop state explicit
+# and gives other threads a clean way to wait/check without polling a flag.
+_tracking_event = threading.Event()
+
 
 def send_movement(direction: str):
     try:
-        requests.get(f"{ROBOT_CONTROL_URL}{direction}", timeout=0.5)
-        print(f"[AUTONOMY] Moved: {direction}")
-    except:
-        pass
+        requests.get(_move_url(direction), timeout=0.8)
+    except Exception as e:
+        logger.error(f"[AUTONOMY] Motor command failed: {e}")
 
-def stop_tracking_loop():
-    global TRACKING_ACTIVE
-    TRACKING_ACTIVE = False
+
+def is_obstacle_too_close(threshold_cm: float = 25.0) -> bool:
+    """Verifies front distance to avoid collisions while tracking."""
+    try:
+        res = requests.get(_distance_url(), timeout=0.8)
+        if res.status_code == 200:
+            return float(res.text) < threshold_cm
+    except Exception:
+        pass
+    return False
+
+
+def is_tracking_active() -> bool:
+    return _tracking_event.is_set()
+
+
+def stop_tracking():
+    _tracking_event.clear()
     send_movement("stop")
 
-def start_tracking_loop():
-    global TRACKING_ACTIVE
-    TRACKING_ACTIVE = True
-    print("[AUTONOMY] Tracking engaged. Hunting for humans...")
 
-    while TRACKING_ACTIVE:
-        frame = get_frame_from_esp32()
-        if frame is None:
-            time.sleep(0.2)
-            continue
+def run_standalone_tracking(vision_pipeline):
+    """
+    Modular tracker referencing the unified VisionPipeline
+    without loading a redundant second YOLO model.
 
-        height, width, _ = frame.shape
-        left_bound, right_bound = int(width * 0.35), int(width * 0.65)
-        
-        results = model.predict(frame, classes=[0], conf=0.5, verbose=False)
-        person_detected = False
+    IMPORTANT: this loop is NOT coordinated with app.py's own
+    AUTONOMOUS_MODE / FOLLOW_ME_MODE / STATE_LOCK. Do not run this at the
+    same time as app.py's follow_me_loop() or autonomous_navigation_loop()
+    against the same robot -- they will issue conflicting movement commands.
+    If this is meant to replace app.py's built-in follow-me logic, wire it
+    in exclusively (and call set_esp32_ip() from app.py whenever the
+    Settings page updates the robot IP); if it's legacy/unused, consider
+    deleting it to avoid it accidentally getting invoked twice.
+    """
+    if vision_pipeline is None:
+        logger.error("[AUTONOMY] Vision pipeline unavailable.")
+        return
 
-        for result in results:
-            for box in result.boxes:
-                x1, y1, x2, y2 = map(int, box.xyxy[0])
-                box_width = x2 - x1
-                person_center_x = x1 + (box_width // 2)
-                person_detected = True
+    _tracking_event.set()
+    logger.info("[AUTONOMY] Autonomous tracker active.")
 
-                if box_width > (width * 0.60): send_movement("stop")
-                elif person_center_x < left_bound: send_movement("left")
-                elif person_center_x > right_bound: send_movement("right")
-                else: send_movement("forward")
-                break
-            if person_detected: break
+    try:
+        while _tracking_event.is_set():
+            # FIX: the entire loop body previously had no try/except. A
+            # single unexpected exception (e.g. a malformed detection dict)
+            # would propagate straight out of this function, past the
+            # `while` loop, past this function's frame entirely -- and
+            # whatever movement was last sent (e.g. "forward") would keep
+            # happening on the robot with nothing left running to stop it,
+            # since send_movement() is fire-and-forget with no duration or
+            # auto-stop. Wrapping the body means a transient error gets
+            # logged and the loop keeps going instead of dying silently
+            # mid-command.
+            try:
+                if is_obstacle_too_close():
+                    send_movement("stop")
+                    time.sleep(0.1)
+                    continue
 
-        if not person_detected:
-            send_movement("stop")
+                person = vision_pipeline.get_person_bbox()
+                frame = vision_pipeline.get_latest_frame()
 
-        time.sleep(0.1)
+                if frame is not None and person:
+                    width = frame.shape[1]
+                    center_x = person["center_x"]
+                    box_w = person["w"]
+
+                    if box_w > (width * 0.60):  # Target is within holding range
+                        send_movement("stop")
+                    elif center_x < (width * 0.35):
+                        send_movement("left")
+                    elif center_x > (width * 0.65):
+                        send_movement("right")
+                    else:
+                        send_movement("forward")
+                else:
+                    send_movement("stop")
+
+            except Exception as e:
+                logger.error(f"[AUTONOMY] Tracking loop error: {e}")
+                send_movement("stop")
+
+            time.sleep(0.08)
+    finally:
+        # FIX: guarantees a stop command is sent no matter HOW this function
+        # exits -- normal stop_tracking() call, an uncaught exception above
+        # somehow escaping the inner try, or the vision_pipeline disappearing
+        # mid-loop. Previously, only the explicit stop_tracking() path sent
+        # a final "stop"; every other exit path could leave the robot moving.
+        send_movement("stop")
+        _tracking_event.clear()
+        logger.info("[AUTONOMY] Autonomous tracker stopped.")

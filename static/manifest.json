@@ -1,0 +1,10 @@
+{
+  "name": "JARVIS 4WD Controller",
+  "short_name": "JARVIS",
+  "description": "Master control dashboard for JARVIS Mini AI Robot",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#000000",
+  "theme_color": "#00ffff",
+  "orientation": "portrait-primary"
+}

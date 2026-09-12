@@ -1,19 +1,80 @@
-customtkinter==5.2.2
-piper-tts==1.2.0
-vosk==0.3.45
-sounddevice==0.4.6
-numpy==1.26.4
+# =============================================================
+# JARVIS MINI V2 -- requirements.txt
+#
+# FIX: the previous version of this file (customtkinter, piper-tts, vosk,
+# sounddevice, pyyaml...) was from an earlier desktop-GUI prototype
+# architecture and does not match what backend/src/jarvis/dashboard/app.py
+# actually imports today. This list was rebuilt by grepping every real
+# `import`/`from ... import` across backend/src, not guessed.
+#
+# NOTE ON SCOPE: this project has two code paths living side by side --
+# the current FastAPI + ESP32 web dashboard (backend/src/jarvis/dashboard/
+# app.py, the one actively developed and fixed) and some older/parallel
+# code (dashboard/desktop_app.py using customtkinter, audio/stt.py using
+# speech_recognition/vosk, ai/mcp_server.py) that was NOT reviewed or
+# touched as part of this fix pass. If you still run the desktop_app.py
+# path, keep customtkinter/vosk/etc. installed separately -- they are
+# deliberately NOT included below since including them here would make it
+# look like they're required for the main dashboard, which they are not.
+# =============================================================
+
+# --- Web server / dashboard ---
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+jinja2==3.1.4
+python-multipart==0.0.9      # required by FastAPI's UploadFile (used by /api/stt)
+python-dotenv==1.0.1
+pydantic==2.9.2
+
+# --- Computer vision ---
 opencv-python==4.9.0.80
-ultralytics==8.1.24
-pyyaml==6.0.1
-requests==2.31.0
-google-genai==0.3.0
+numpy==1.26.4
+ultralytics==8.1.24          # YOLO11n object/person detection
+mediapipe==0.10.14           # hand-gesture navigation
 
-- #Ensute Your Virtual Environment is Still Active 
-#.\venv\Scripts\activate 
+# --- AI / LLM ---
+groq==0.11.0                 # primary cloud reasoning + Whisper STT
+google-genai==0.3.0          # Gemini vision fallback + hazard scan
+ollama==0.3.3                # local offline reasoning fallback
+chromadb==0.5.5              # long-term memory (RAG vector store)
 
-- #(In config/camera.yaml)
-# vision:
-  # stream_url: "http://192.168.1.55:81/stream"  # Replace with your ESP32-CAM IP
-  # model: "yolov8n.pt"
-  # confidence_threshold: 0.5
+# --- Speech ---
+gTTS==2.5.3
+pydub==0.25.1                # audio resampling for the ESP32 I2S stream
+pygame==2.6.1                # local audio playback fallback (see audio/tts.py)
+
+# --- Hardware / networking / system ---
+requests==2.32.3
+psutil==6.0.0
+
+# --- Cloud storage ---
+cloudinary==1.41.0
+
+# =============================================================
+# Not pinned here (source not reviewed/fixed in this pass, only referenced
+# by legacy/parallel modules -- install manually only if you use them):
+#   customtkinter   -- backend/src/jarvis/dashboard/desktop_app.py
+#   vosk            -- backend/src/jarvis/audio/stt.py (offline STT path)
+#   sounddevice     -- backend/src/jarvis/audio/stt.py
+#   speech_recognition -- backend/src/jarvis/audio/stt.py
+#   pyttsx3         -- offline TTS fallback referenced in audio/tts.py
+#   piper-tts       -- referenced by en_US-lessac-medium.onnx.json at repo root
+#   mcp             -- backend/src/jarvis/ai/mcp_server.py
+#   pillow (PIL)    -- used somewhere in the legacy path; not needed by
+#                      the FastAPI dashboard directly
+#
+# Wake-word engine (backend/src/jarvis/ai/local_wake_word.py) also has an
+# unconfirmed dependency -- its source wasn't reviewed in this pass. Check
+# that file directly for what it imports before a clean-machine install.
+# =============================================================
+
+# --- Setup reminder ---
+# Windows (PowerShell), after cloning:
+#   python -m venv venv
+#   .\venv\Scripts\activate
+#   pip install -r requirements.txt
+#
+# Camera/robot IPs are no longer read from config/camera.yaml -- that file
+# is deprecated. Set ESP32_IP and ESP32_CAM_STREAM_URL in your .env
+# instead (see .env.example), or update them live from the dashboard's
+# Settings page without restarting the server.

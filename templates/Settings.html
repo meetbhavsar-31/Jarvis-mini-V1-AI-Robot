@@ -4,35 +4,136 @@
 
 <div class="page-header">
   <h2>Settings</h2>
-  <p class="page-subtitle">Robot identity, connection, and appearance</p>
+  <p class="page-subtitle">Robot identity, AI brain, and hardware configurations</p>
 </div>
 
 <section class="card card-settings">
-
   <form id="settingsForm" class="settings-form">
 
     <div class="form-group">
-      <label for="robotName">Robot Name</label>
-      <input type="text" id="robotName" name="robotName" value="JARVIS-01" placeholder="Robot name">
+      <label for="robotName">Robot Designation</label>
+      <input type="text" id="robotName" name="robotName" placeholder="Robot name">
     </div>
 
     <div class="form-group">
-      <label for="robotIp">Connection IP</label>
-      <input type="text" id="robotIp" name="robotIp" value="192.168.1.42" placeholder="e.g. 192.168.1.42">
+      <label for="robotIp">Robot IPv4 Address (motors / eyes / speaker board)</label>
+      <input type="text" id="robotIp" name="robotIp" placeholder="e.g. 192.168.1.42">
+      <small style="color: #35e07a;">Applies immediately, no restart needed.</small>
     </div>
 
+    <!-- NEW: this field didn't exist before. Your motor board and camera
+         board are two separate ESP32 devices on two different IPs -- the
+         old form could only ever change the motor IP, leaving the camera
+         stream IP stuck at whatever was in .env until a manual restart. -->
     <div class="form-group">
-      <label for="robotPort">Connection Port</label>
-      <input type="text" id="robotPort" name="robotPort" value="5000" placeholder="e.g. 5000">
+      <label for="cameraIp">Camera Stream IPv4 Address (ESP32-CAM board)</label>
+      <input type="text" id="cameraIp" name="cameraIp" placeholder="e.g. 192.168.1.66">
+      <small style="color: #35e07a;">Applies immediately, no restart needed. This is separate from the Robot IP above -- most JARVIS builds use two ESP32 boards.</small>
     </div>
 
- 
+    <div class="form-group" style="margin-top: 10px;">
+      <label for="aiEngine">Primary AI Reasoning Engine</label>
+      <select id="aiEngine" name="aiEngine" style="background: var(--bg-panel-alt); border: 1px solid var(--border-soft); border-radius: var(--radius-sm); padding: 10px; color: var(--text-primary);">
+        <option value="groq">Groq Cloud (openai/gpt-oss-20b + 120b fallback)</option>
+        <option value="ollama">Local Offline (Ollama Qwen)</option>
+      </select>
+      <small style="color: #35e07a;">Applies immediately. "Local Offline" tries Ollama first for every response and only falls back to cloud engines if Ollama itself is unreachable; note tool-calling (web search, diagnostics, etc.) is only available on the Groq path.</small>
+    </div>
 
-    <button type="submit" class="btn btn-primary" id="saveSettingsBtn">Save Settings</button>
+    <div class="form-group" style="margin-top: 10px;">
+      <label for="baseSpeed">Base Motor PWM Speed</label>
+      <div style="display: flex; align-items: center; gap: 10px;">
+        <input type="range" id="baseSpeed" name="baseSpeed" min="50" max="255" value="180" style="flex: 1;">
+        <span id="baseSpeedValue" style="color: var(--accent); font-size: 12px; font-weight: bold;">180 PWM</span>
+      </div>
+      <small style="color: #f0a020;">Stored and returned by the server now, but the current ESP32 firmware still ignores it (hardcoded speed) -- that half of this fix has to happen in the ESP32 sketch, not here.</small>
+    </div>
+
+    <div class="form-group form-group-toggle" style="margin-top: 10px;">
+      <label>Enable Local Voice Wake Word (Hands-Free)</label>
+      <label class="switch">
+        <input type="checkbox" id="wakeWordToggle">
+        <span class="slider"></span>
+      </label>
+      <small style="color: #35e07a;">Applies immediately: when disabled, Jarvis ignores wake-word triggers (the listener thread keeps running in the background, it just won't act on "Jarvis" anymore).</small>
+    </div>
+
+    <button type="button" class="btn btn-primary" id="saveSettingsBtn" style="margin-top: 15px;">Save Configuration</button>
     <div class="settings-saved-msg" id="settingsSavedMsg"></div>
 
   </form>
-
 </section>
+
+<script>
+  const API_TOKEN = "{{ api_token }}";
+  function authHeaders(extra = {}) {
+    const headers = { ...extra };
+    if (API_TOKEN) headers['X-API-Token'] = API_TOKEN;
+    return headers;
+  }
+
+  const baseSpeedInput = document.getElementById('baseSpeed');
+  const baseSpeedValue = document.getElementById('baseSpeedValue');
+  baseSpeedInput.addEventListener('input', () => {
+    baseSpeedValue.textContent = baseSpeedInput.value + ' PWM';
+  });
+
+  // FIX: this page previously never loaded real settings -- values shown
+  // were hardcoded HTML defaults regardless of what was actually saved,
+  // because GET /api/settings didn't exist on the backend at all.
+  async function loadSettings() {
+    try {
+      const res = await fetch('/api/settings');
+      const data = await res.json();
+      const s = data.settings;
+      document.getElementById('robotName').value = s.robotName;
+      document.getElementById('robotIp').value = s.robotIp;
+      document.getElementById('cameraIp').value = s.cameraIp || '';
+      document.getElementById('aiEngine').value = s.aiEngine;
+      document.getElementById('baseSpeed').value = s.baseSpeed;
+      baseSpeedValue.textContent = s.baseSpeed + ' PWM';
+      document.getElementById('wakeWordToggle').checked = s.wakeWordEnabled;
+    } catch (err) {
+      document.getElementById('settingsSavedMsg').innerText = 'Failed to load current settings.';
+    }
+  }
+
+  // FIX: this button previously did NOT save anything at all -- it just
+  // showed a fake "Saving..." then "Settings successfully applied." message
+  // via setTimeout(), with zero actual network request. Now it really saves,
+  // and the backend actually applies robotIp/cameraIp/aiEngine/wakeWord live.
+  document.getElementById('saveSettingsBtn').addEventListener('click', async () => {
+    const msg = document.getElementById('settingsSavedMsg');
+    msg.innerText = "Saving configuration...";
+
+    const payload = {
+      robotName: document.getElementById('robotName').value,
+      robotIp: document.getElementById('robotIp').value,
+      cameraIp: document.getElementById('cameraIp').value,
+      aiEngine: document.getElementById('aiEngine').value,
+      baseSpeed: parseInt(document.getElementById('baseSpeed').value, 10),
+      wakeWordEnabled: document.getElementById('wakeWordToggle').checked
+    };
+
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'POST',
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (res.ok && data.status === 'success') {
+        msg.innerText = "Settings saved and applied.";
+      } else {
+        msg.innerText = "Failed to save settings.";
+      }
+    } catch (err) {
+      msg.innerText = "Error saving settings: " + err.message;
+    }
+    setTimeout(() => msg.innerText = "", 4000);
+  });
+
+  loadSettings();
+</script>
 
 {% endblock %}

@@ -1,0 +1,148 @@
+{% extends "base.html" %}
+{% block title %} — Controls{% endblock %}
+{% block content %}
+
+<div class="page-header">
+  <h2>Controls</h2>
+  <p class="page-subtitle">Manual drive controls + robot actions</p>
+</div>
+
+<div class="grid-controls">
+
+  <section class="card card-dpad">
+    <div class="card-header"><h3>Directional Control</h3></div>
+    <div class="dpad">
+      <button class="dpad-btn dpad-up" data-direction="forward" aria-label="Forward">&#9650;</button>
+      <button class="dpad-btn dpad-left" data-direction="left" aria-label="Left">&#9664;</button>
+      <button class="dpad-btn dpad-stop" data-direction="stop" aria-label="Stop">&#9632;</button>
+      <button class="dpad-btn dpad-right" data-direction="right" aria-label="Right">&#9654;</button>
+      <button class="dpad-btn dpad-down" data-direction="backward" aria-label="Backward">&#9660;</button>
+    </div>
+    <p style="color: #8fa7c4; font-size: 11px; margin-top: 10px; text-align: center;">
+      Or use W/A/S/D keys (Q/E for diagonals, Space to stop)
+    </p>
+  </section>
+
+  <section class="card card-actions">
+    <div class="card-header"><h3>Robot Actions</h3></div>
+    <div class="action-btn-list">
+      <button class="btn btn-secondary" id="controlsScreenshotBtn">Take Screenshot</button>
+      <button class="btn btn-primary" id="controlsAutonomyBtn" data-command="autonomy_start">Start Autonomy</button>
+      <button class="btn btn-danger" id="controlsStopBtn">Stop Robot</button>
+    </div>
+  </section>
+
+</div>
+
+<script>
+  // FIX: this page previously had no script at all -- the dpad buttons and
+  // action buttons (data-command attributes) had zero event listeners
+  // attached anywhere on this page, so nothing here actually worked.
+  // Self-contained now, doesn't depend on any shared/external script.
+
+  const API_TOKEN = "{{ api_token }}";
+  function authHeaders(extra = {}) {
+    const headers = { ...extra };
+    if (API_TOKEN) headers['X-API-Token'] = API_TOKEN;
+    return headers;
+  }
+
+  // --- Movement: same hardened multi-key-tracking logic as the main
+  // Dashboard, so holding multiple keys/buttons together behaves correctly
+  // and out-of-order network responses can't override a newer command.
+  const heldMovementKeys = new Set();
+  let moveRequestSeq = 0;
+  let lastSentDirection = null;
+
+  function moveRobot(dir) {
+    if (dir === lastSentDirection) return;
+    lastSentDirection = dir;
+    const seq = ++moveRequestSeq;
+    fetch(`/api/move?dir=${dir}&duration=0`, { headers: authHeaders() })
+      .catch(() => {})
+      .finally(() => { if (seq !== moveRequestSeq) return; });
+  }
+
+  function recomputeMovementFromHeldKeys() {
+    const has = (k) => heldMovementKeys.has(k);
+    let dir = 'stop';
+    if (has('KeyW') && has('KeyD')) dir = 'forward_right';
+    else if (has('KeyW') && has('KeyA')) dir = 'forward_left';
+    else if (has('KeyS') && has('KeyD')) dir = 'backward_right';
+    else if (has('KeyS') && has('KeyA')) dir = 'backward_left';
+    else if (has('KeyW')) dir = 'forward';
+    else if (has('KeyS')) dir = 'backward';
+    else if (has('KeyA')) dir = 'left';
+    else if (has('KeyD')) dir = 'right';
+    else if (has('KeyQ')) dir = 'forward_left';
+    else if (has('KeyE')) dir = 'forward_right';
+    moveRobot(dir);
+  }
+
+  document.querySelectorAll('.dpad-btn').forEach(btn => {
+    btn.addEventListener('mousedown', () => moveRobot(btn.dataset.direction));
+    btn.addEventListener('touchstart', (e) => { e.preventDefault(); moveRobot(btn.dataset.direction); });
+    btn.addEventListener('mouseup', () => moveRobot('stop'));
+    btn.addEventListener('touchend', (e) => { e.preventDefault(); moveRobot('stop'); });
+    btn.addEventListener('mouseleave', () => moveRobot('stop'));
+  });
+
+  const MOVEMENT_KEYS = ['KeyW', 'KeyS', 'KeyA', 'KeyD', 'KeyQ', 'KeyE'];
+
+  window.addEventListener('keydown', (e) => {
+    if (['input', 'textarea'].includes(document.activeElement.tagName.toLowerCase())) return;
+    if (e.code === 'Space') { e.preventDefault(); heldMovementKeys.clear(); moveRobot('stop'); return; }
+    if (MOVEMENT_KEYS.includes(e.code)) {
+      e.preventDefault();
+      if (!e.repeat) {
+        heldMovementKeys.add(e.code);
+        recomputeMovementFromHeldKeys();
+      }
+    }
+  });
+
+  window.addEventListener('keyup', (e) => {
+    if (['input', 'textarea'].includes(document.activeElement.tagName.toLowerCase())) return;
+    if (MOVEMENT_KEYS.includes(e.code)) {
+      heldMovementKeys.delete(e.code);
+      recomputeMovementFromHeldKeys();
+    }
+  });
+
+  window.addEventListener('blur', () => {
+    heldMovementKeys.clear();
+    moveRobot('stop');
+  });
+
+  // --- Action buttons ---
+  document.getElementById('controlsScreenshotBtn').addEventListener('click', () => {
+    fetch('/api/control', {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ command: 'screenshot' })
+    });
+  });
+
+  let isAutonomyActive = false;
+  document.getElementById('controlsAutonomyBtn').addEventListener('click', function () {
+    isAutonomyActive = !isAutonomyActive;
+    this.textContent = isAutonomyActive ? 'Stop Autonomy' : 'Start Autonomy';
+    this.dataset.command = isAutonomyActive ? 'autonomy_stop' : 'autonomy_start';
+    fetch('/api/control', {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ command: this.dataset.command })
+    });
+  });
+
+  document.getElementById('controlsStopBtn').addEventListener('click', () => {
+    heldMovementKeys.clear();
+    fetch('/api/control', {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ command: 'stop' })
+    });
+  });
+</script>
+
+{% endblock %}

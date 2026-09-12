@@ -1,0 +1,181 @@
+import cv2
+import os
+import threading
+import time
+import numpy as np
+import requests
+from dotenv import load_dotenv
+from jarvis.common.logger import setup_logger
+from jarvis.robot_runtime.telemetry_manager import TelemetryManager
+
+# face_recognition/dlib removed by request -- caused a numpy version conflict
+# with kokoro-onnx (TTS) and opencv, which both need numpy>=2. dlib's Windows
+# wheel needed numpy<2, forcing a downgrade that broke TTS audio quality.
+# YOLO11n below still provides real-time object detection, unaffected.
+
+try:
+    from ultralytics import YOLO
+except ImportError:
+    YOLO = None
+
+load_dotenv()
+logger = setup_logger()
+
+
+class VisionPipeline:
+    def __init__(self):
+        self.stream_url = os.getenv("ESP32_CAM_STREAM_URL", "http://192.168.29.175/stream")
+        self.telemetry = TelemetryManager()
+        self.running = False
+        self.latest_frame = None
+        self.last_frame_time = 0.0  # for diagnosing a stale/dead stream
+        self.thread = None
+        self.lock = threading.Lock()
+
+        # YOLO11n Offline Object Detection State
+        self.yolo_model = None
+        self.detected_objects = []  # list of {"label": str, "confidence": float, "box": [x1,y1,x2,y2]}
+        self.yolo_lock = threading.Lock()
+        self._load_yolo_model()
+
+    def _load_yolo_model(self, model_path: str = "yolo11n.pt"):
+        """
+        Loads YOLO11n for local, offline object detection. Falls back
+        gracefully (detection just stays disabled) if ultralytics isn't
+        installed or the model file can't be found/downloaded -- this must
+        never crash the whole vision pipeline.
+        """
+        if YOLO is None:
+            logger.warning("ultralytics not installed. Run: pip install ultralytics --break-system-packages. YOLO detection disabled.")
+            return
+        try:
+            self.yolo_model = YOLO(model_path)  # auto-downloads yolo11n.pt on first run if missing
+            logger.info(f"YOLO11n object detection model loaded ({model_path}).")
+        except Exception as e:
+            logger.error(f"Failed to load YOLO model: {e}. Object detection disabled.")
+            self.yolo_model = None
+
+    def _run_yolo_detection(self, frame):
+        """Runs YOLO11n inference on a single frame, updates self.detected_objects."""
+        if self.yolo_model is None:
+            return
+        try:
+            results = self.yolo_model.predict(frame, verbose=False, conf=0.4)
+            detections = []
+            for r in results:
+                for box in r.boxes:
+                    label = self.yolo_model.names[int(box.cls[0])]
+                    confidence = float(box.conf[0])
+                    xyxy = box.xyxy[0].tolist()
+                    detections.append({"label": label, "confidence": round(confidence, 2), "box": xyxy})
+            with self.yolo_lock:
+                self.detected_objects = detections
+        except Exception as e:
+            logger.error(f"YOLO detection error: {e}")
+
+    def start_stream(self):
+        if self.running:
+            return
+        self.running = True
+        self.thread = threading.Thread(target=self._process_loop, daemon=True)
+        self.thread.start()
+        logger.info(f"Persistent Vision stream started for: {self.stream_url}")
+
+    def _process_loop(self):
+        headers = {"User-Agent": "Mozilla/5.0"}
+        
+        while self.running:
+            try:
+                response = requests.get(self.stream_url, stream=True, timeout=5, headers=headers)
+                if response.status_code != 200:
+                    time.sleep(1.0)
+                    continue
+
+                bytes_data = bytes()
+                for chunk in response.iter_content(chunk_size=4096):
+                    if not self.running:
+                        break
+                    
+                    bytes_data += chunk
+                    a = bytes_data.find(b'\xff\xd8')
+                    b = bytes_data.find(b'\xff\xd9')
+                    
+                    if a != -1 and b != -1:
+                        jpg = bytes_data[a:b+2]
+                        bytes_data = bytes_data[b+2:]
+                        
+                        frame = cv2.imdecode(np.frombuffer(jpg, dtype=np.uint8), cv2.IMREAD_COLOR)
+                        if frame is not None:
+                            # Run YOLO every 5th frame -- object positions don't
+                            # need to update every single frame, and this keeps
+                            # CPU load reasonable on modest hardware.
+                            self._frame_counter = getattr(self, "_frame_counter", 0) + 1
+                            if self.yolo_model is not None and self._frame_counter % 5 == 0:
+                                threading.Thread(target=self._run_yolo_detection, args=(frame.copy(),), daemon=True).start()
+
+                            with self.lock:
+                                self.latest_frame = frame
+                                self.last_frame_time = time.time()
+
+            except Exception as e:
+                logger.warning(f"ESP32 stream reconnecting: {e}")
+                time.sleep(1.0)
+
+    def get_latest_frame(self):
+        with self.lock:
+            return self.latest_frame.copy() if self.latest_frame is not None else None
+
+    def get_recognized_faces(self):
+        """Face recognition removed by request. Stub kept so existing callers
+        in app.py/brain.py don't break -- always returns empty."""
+        return []
+
+    def learn_new_face(self, name: str) -> tuple[bool, str]:
+        """Face recognition removed by request. Stub kept for the
+        learn_new_person tool in brain.py -- reports clearly instead of crashing."""
+        return False, "Face recognition has been disabled on this robot."
+
+    def generate_mjpeg_stream(self):
+        while self.running:
+            frame = self.get_latest_frame()
+            if frame is not None:
+                success, buffer = cv2.imencode('.jpg', frame)
+                if success:
+                    yield (b'--frame\r\n'
+                           b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+            time.sleep(0.04)
+
+    def get_yolo_detections(self):
+        """Returns the current list of YOLO-detected objects: [{"label","confidence","box"}, ...]"""
+        with self.yolo_lock:
+            return list(self.detected_objects)
+
+    def get_detected_labels(self):
+        """Returns YOLO-detected object labels. (Previously also included
+        recognized face names -- face recognition removed by request.)"""
+        return list(set(obj["label"] for obj in self.get_yolo_detections()))
+
+    def diagnose(self) -> dict:
+        """
+        Camera health check. Call this to find out WHY 'what do you see'
+        isn't working, instead of guessing: is the stream even connecting,
+        is the last frame stale, is YOLO loaded.
+        """
+        with self.lock:
+            has_frame = self.latest_frame is not None
+            age = time.time() - self.last_frame_time if self.last_frame_time else None
+        return {
+            "stream_url": self.stream_url,
+            "stream_running": self.running,
+            "has_frame": has_frame,
+            "last_frame_age_seconds": round(age, 1) if age is not None else None,
+            "frame_considered_stale": (age is not None and age > 5.0),
+            "yolo_loaded": self.yolo_model is not None,
+            "current_yolo_detections": self.get_yolo_detections(),
+            "recognized_faces": self.get_recognized_faces(),
+        }
+
+    def stop_stream(self):
+        self.running = False
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=2.0)

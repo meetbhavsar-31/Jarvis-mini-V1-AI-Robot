@@ -1,0 +1,115 @@
+import os
+import time
+import cv2
+import requests
+import numpy as np
+from dotenv import load_dotenv
+from ultralytics import YOLO
+
+load_dotenv()
+
+esp32_ip = os.getenv("ESP32_IP", "http://192.168.29.173").rstrip("/")
+ROBOT_CONTROL_URL = f"{esp32_ip}/move?dir="
+DISTANCE_URL = f"{esp32_ip}/distance"
+
+TRACKING_ACTIVE = False
+
+try:
+    model = YOLO("yolov8n.pt")
+except Exception as e:
+    print(f"YOLO Load Error: {e}")
+    model = None
+
+
+def send_movement(direction: str):
+    try:
+        requests.get(f"{ROBOT_CONTROL_URL}{direction.lower()}", timeout=0.4)
+    except Exception:
+        pass
+
+
+def is_obstacle_too_close() -> bool:
+    """Verifies front distance to avoid crashing into walls while tracking."""
+    try:
+        res = requests.get(DISTANCE_URL, timeout=0.4)
+        if res.status_code == 200:
+            return float(res.text) < 25.0
+    except Exception:
+        pass
+    return False
+
+
+def stop_tracking_loop():
+    global TRACKING_ACTIVE
+    TRACKING_ACTIVE = False
+    send_movement("stop")
+
+
+def start_tracking_loop(vision_pipeline=None):
+    global TRACKING_ACTIVE
+    if model is None:
+        print("[AUTONOMY] Cannot start tracking: YOLO model is not loaded.")
+        return
+
+    TRACKING_ACTIVE = True
+    print("[AUTONOMY] Human-tracking active. Standing by...")
+
+    while TRACKING_ACTIVE:
+        # Pull latest frame from VisionPipeline (zero network overhead)
+        frame = None
+        if vision_pipeline:
+            frame = vision_pipeline.get_latest_frame()
+
+        # Fallback to direct snapshot if vision_pipeline is not passed
+        if frame is None:
+            try:
+                res = requests.get(f"{esp32_ip}/capture", timeout=1.0)
+                if res.status_code == 200:
+                    arr = np.frombuffer(res.content, dtype=np.uint8)
+                    frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            except Exception:
+                pass
+
+        if frame is None:
+            time.sleep(0.1)
+            continue
+
+        # Obstacle check
+        if is_obstacle_too_close():
+            print("[AUTONOMY] Obstacle close! Halting forward movement.")
+            send_movement("stop")
+            time.sleep(0.2)
+            continue
+
+        height, width, _ = frame.shape
+        left_bound = int(width * 0.35)
+        right_bound = int(width * 0.65)
+        
+        # Run YOLO for person (class 0)
+        results = model.predict(frame, classes=[0], conf=0.5, verbose=False)
+        person_detected = False
+
+        for result in results:
+            for box in result.boxes:
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                box_width = x2 - x1
+                person_center_x = x1 + (box_width // 2)
+                person_detected = True
+
+                # Tracking control matrix
+                if box_width > (width * 0.55):  # Close enough
+                    send_movement("stop")
+                elif person_center_x < left_bound:
+                    send_movement("left")
+                elif person_center_x > right_bound:
+                    send_movement("right")
+                else:
+                    send_movement("forward")
+                break
+            if person_detected:
+                break
+
+        if not person_detected:
+            send_movement("stop")
+
+        time.sleep(0.08)

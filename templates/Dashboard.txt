@@ -1,0 +1,574 @@
+{% extends "base.html" %}
+{% block title %} — Tactical Dashboard{% endblock %}
+{% block content %}
+
+<!-- PWA Meta Tags -->
+<link rel="manifest" href="/manifest.json">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#00ffff">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+
+<style>
+  .grid-dashboard-responsive {
+    display: grid;
+    grid-template-columns: 1fr 1.8fr 1.1fr;
+    gap: 16px;
+    align-items: stretch;
+    flex: 1;
+    min-height: 0;
+  }
+  @media (max-width: 980px) {
+    .grid-dashboard-responsive {
+      grid-template-columns: 1fr !important;
+      display: flex !important;
+      flex-direction: column !important;
+      overflow-y: auto !important;
+      height: auto !important;
+    }
+    .dash-col-middle {
+      order: -1; 
+    }
+  }
+  .mic-btn.listening {
+    background: #da3633 !important;
+    color: #fff !important;
+    animation: pulse 1.2s infinite;
+  }
+  @keyframes pulse {
+    0% { transform: scale(1); }
+    50% { transform: scale(1.1); }
+    100% { transform: scale(1); }
+  }
+  .team-card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    gap: 10px;
+    margin-top: 8px;
+  }
+  .team-member-box {
+    background: #0d1117;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    padding: 8px;
+    text-align: center;
+    transition: 0.2s;
+  }
+  .team-member-box:hover {
+    border-color: #58a6ff;
+  }
+  .team-member-box img {
+    width: 60px;
+    height: 60px;
+    border-radius: 50%;
+    object-fit: cover;
+    margin-bottom: 6px;
+    border: 2px solid #58a6ff;
+  }
+</style>
+
+<div class="dashboard-viewport" style="height: 100%; display: flex; flex-direction: column; flex: 1; min-height: 0;">
+  
+  <div id="robotOfflineAlert" style="display: none; position: fixed; top: 20px; left: 50%; transform: translateX(-50%); z-index: 9999; background: #da3633; color: white; padding: 12px 20px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); font-size: 13px; font-weight: bold; text-align: center;">
+    ⚠️ ROBOT IS OFFLINE — Please verify robot power and Wi-Fi connection.
+  </div>
+
+  <div id="robotOnlineAlert" style="display: none; position: fixed; top: 20px; left: 50%; transform: translateX(-50%); z-index: 9999; background: #238636; color: white; padding: 12px 20px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); font-size: 13px; font-weight: bold; text-align: center;">
+    ✅ CONNECTION SECURED — JARVIS hardware is online.
+  </div>
+
+  <div class="grid-dashboard-responsive">
+
+    <!-- LEFT COLUMN -->
+    <div class="dash-col dash-col-left" style="overflow-y: auto;">
+
+      <section class="card card-activity-compact">
+        <div class="card-header">
+          <h3>Activity Log</h3>
+          <a href="{{ url_for('logs') }}" class="card-link">View All &rarr;</a>
+        </div>
+        <ul class="log-list-compact" id="activityLogCompact">
+          <li class="log-loading">Loading telemetry...</li>
+        </ul>
+      </section>
+
+      <!-- Volume Slider -->
+      <section class="card" style="margin-top: 10px; padding: 12px; background: #161b22; border: 1px solid #30363d; border-radius: 8px;">
+        <div class="card-header" style="margin-bottom: 8px;">
+          <h3 style="font-size: 13px; color: #58a6ff;">🔊 Speaker Volume</h3>
+        </div>
+        <div style="display: flex; gap: 8px; align-items: center;">
+          <span>🔈</span>
+          <input type="range" id="volumeSlider" min="0" max="100" value="50" style="flex:1; cursor: pointer;" oninput="updateVolume(this.value)">
+          <span id="volLabel" style="color: #58a6ff; font-weight: bold; width: 40px; text-align: right; font-size: 12px;">50%</span>
+        </div>
+      </section>
+
+      <section class="card card-quick-actions" style="margin-top: 10px;">
+        <div class="card-header"><h3>Action Controls</h3></div>
+        <div class="quick-action-cluster" style="display: flex; gap: 10px; margin-bottom: 8px;">
+          <button class="btn btn-secondary btn-full" onclick="takePhoto()">Take Photo</button>
+        </div>
+        <button id="autonomyToggleBtn" class="btn btn-primary btn-full" style="margin-bottom: 8px;" onclick="toggleAutonomyState()">Start Autonomy</button>
+      </section>
+
+      <section class="card card-manual-controls" style="margin-top: 10px;">
+        <div class="card-header"><h3>Manual Controls (W/A/S/D)</h3></div>
+        <div class="dpad" id="drivePad">
+          <button class="dpad-btn dpad-up" data-direction="forward">&#9650;</button>
+          <button class="dpad-btn dpad-left" data-direction="left">&#9664;</button>
+          <button class="dpad-btn dpad-stop" data-direction="stop">&#9632;</button>
+          <button class="dpad-btn dpad-right" data-direction="right">&#9654;</button>
+          <button class="dpad-btn dpad-down" data-direction="backward">&#9660;</button>
+        </div>
+      </section>
+
+      <div class="eye-panel-wrapper" style="display: flex; gap: 10px; margin-top: 10px;">
+        <div class="card mini-face-card" id="miniFaceCard" style="display: flex; align-items: center; justify-content: center; padding: 10px;">
+            <svg viewBox="0 0 200 110" width="72" height="44" xmlns="http://www.w3.org/2000/svg">
+            <g class="mini-face-eyes">
+              <circle class="mini-face-eye-ring" cx="60" cy="42" r="17" fill="none" stroke="currentColor" stroke-width="8"></circle>
+              <circle class="mini-face-eye-pupil" cx="60" cy="42" r="6" fill="currentColor"></circle>
+              <circle class="mini-face-eye-ring" cx="140" cy="42" r="17" fill="none" stroke="currentColor" stroke-width="8"></circle>
+              <circle class="mini-face-eye-pupil" cx="140" cy="42" r="6" fill="currentColor"></circle>
+            </g>
+            <path class="mini-face-mouth" d="M 68 80 Q 100 100 132 80" fill="none" stroke="currentColor" stroke-width="8" stroke-linecap="round"></path>
+            </svg>
+        </div>
+
+        <section class="card card-eye-color" style="flex: 1;">
+          <div class="card-header" style="margin-bottom: 5px;"><h3 style="font-size: 11px;">Eye Color</h3></div>
+          <div class="eye-color-row" style="display: flex; gap: 5px; flex-wrap: wrap;">
+            <button class="eye-color-swatch" style="width: 20px; height: 20px; border-radius: 50%; background-color:#1de9b6;" onclick="changeEyes('#00FFCC')"></button>
+            <button class="eye-color-swatch" style="width: 20px; height: 20px; border-radius: 50%; background-color:#ff4d6d;" onclick="changeEyes('#FF3366')"></button>
+            <button class="eye-color-swatch" style="width: 20px; height: 20px; border-radius: 50%; background-color:#2ecc71;" onclick="changeEyes('#00FF66')"></button>
+            <button class="eye-color-swatch" style="width: 20px; height: 20px; border-radius: 50%; background-color:#ffc107;" onclick="changeEyes('#FFCC00')"></button>
+            <button class="eye-color-swatch" style="width: 20px; height: 20px; border-radius: 50%; background-color:#29b6f6;" onclick="changeEyes('#3399FF')"></button>
+            <button class="eye-color-swatch" style="width: 20px; height: 20px; border-radius: 50%; background-color:#ab47bc;" onclick="changeEyes('#CC33FF')"></button>
+          </div>
+        </section>
+      </div>
+
+    </div>
+
+    <!-- MIDDLE COLUMN -->
+    <div class="dash-col dash-col-middle" style="display: flex; flex-direction: column; overflow-y: auto;">
+
+      <!-- Camera Section -->
+      <section class="card card-camera-preview" style="flex: 1; display: flex; flex-direction: column; min-height: 280px;">
+        <div class="card-header">
+          <h3>ESP32 Camera Stream</h3>
+          <a href="{{ url_for('camera') }}" class="card-link">Full View &rarr;</a>
+        </div>
+        <div class="camera-preview" id="cameraPreviewSmall" style="position: relative; flex: 1; border-radius: 8px; overflow: hidden; background: #000; display: flex; align-items: center; justify-content: center;">
+          <img id="liveCameraFeed" src="/video_feed" alt="" style="width: 100%; height: 100%; max-height: 100%; object-fit: contain; image-rendering: pixelated; border-radius: 6px;" onerror="this.style.display='none'; document.getElementById('camFallback').style.display='flex';">
+          <div id="camFallback" style="display: none; position: absolute; color: #8fa7c4; font-size: 12px; flex-direction: column; align-items: center; gap: 6px;">
+            <span>📷 Video stream loading or offline...</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Telemetry Strip -->
+      <section class="card card-battery-small" style="margin-top: 10px; padding: 10px;">
+        <div class="battery-strip" id="batteryStrip" style="display: flex; justify-content: space-around; align-items: center; font-size: 12px;">
+          <span>🔋 Battery: <b id="batteryPercent" style="color: #35e07a;">--%</b></span>
+          <span>⚡ Status: <b id="batteryState">--</b></span>
+          <span>📏 Distance: <b id="ultrasonicVal" style="color: #58a6ff;">-- cm</b></span>
+        </div>
+      </section>
+
+      <!-- CREATORS & ENGINEERING TEAM SECTION -->
+      <section class="card" style="margin-top: 10px; padding: 12px; background: #161b22; border-radius: 8px; border: 1px solid #30363d;">
+        <div class="card-header" style="margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center;">
+          <h3 style="font-size: 13px; color: #58a6ff;">👥 Group 7 Engineering Team (Guide: Prof. P. V. Gupta)</h3>
+          <button class="btn btn-secondary" style="font-size: 11px; padding: 4px 8px;" onclick="castAllTeamToRobot()">Show All on Robot Screen</button>
+        </div>
+        
+        <div class="team-card-grid">
+          <!-- Meet -->
+          <div class="team-member-box">
+            <img src="/static/team/meet.jpg" onerror="this.src='/static/team/default.png'">
+            <div style="font-size: 12px; font-weight: bold; color: white;">Meet Bhavsar</div>
+            <div style="font-size: 10px; color: #8fa7c4;">Lead & Firmware</div>
+            <button class="btn btn-secondary" style="font-size: 9px; padding: 2px 6px; margin-top: 4px;" onclick="castMemberToRobot('meet.jpg', 'Meet Bhavsar', 'Lead & Firmware')">Show on Robot</button>
+          </div>
+          <!-- Bhakti -->
+          <div class="team-member-box">
+            <img src="/static/team/bhakti.jpg" onerror="this.src='/static/team/default.png'">
+            <div style="font-size: 12px; font-weight: bold; color: white;">Bhakti Nivgane</div>
+            <div style="font-size: 10px; color: #8fa7c4;">Hardware & Power</div>
+            <button class="btn btn-secondary" style="font-size: 9px; padding: 2px 6px; margin-top: 4px;" onclick="castMemberToRobot('bhakti.jpg', 'Bhakti Nivgane', 'Hardware & Power')">Show on Robot</button>
+          </div>
+          <!-- Shreya -->
+          <div class="team-member-box">
+            <img src="/static/team/shreya.jpg" onerror="this.src='/static/team/default.png'">
+            <div style="font-size: 12px; font-weight: bold; color: white;">Shreya Shukla</div>
+            <div style="font-size: 10px; color: #8fa7c4;">AI & Backend Data</div>
+            <button class="btn btn-secondary" style="font-size: 9px; padding: 2px 6px; margin-top: 4px;" onclick="castMemberToRobot('shreya.jpg', 'Shreya Shukla', 'AI & Backend Data')">Show on Robot</button>
+          </div>
+          <!-- Dhara -->
+          <div class="team-member-box">
+            <img src="/static/team/dhara.jpg" onerror="this.src='/static/team/default.png'">
+            <div style="font-size: 12px; font-weight: bold; color: white;">Dhara Thakkar</div>
+            <div style="font-size: 10px; color: #8fa7c4;">Vision & Tracking</div>
+            <button class="btn btn-secondary" style="font-size: 9px; padding: 2px 6px; margin-top: 4px;" onclick="castMemberToRobot('dhara.jpg', 'Dhara Thakkar', 'Vision & Tracking')">Show on Robot</button>
+          </div>
+          <!-- Janvi -->
+          <div class="team-member-box">
+            <img src="/static/team/janvi.jpg" onerror="this.src='/static/team/default.png'">
+            <div style="font-size: 12px; font-weight: bold; color: white;">Janvi Bhatt</div>
+            <div style="font-size: 10px; color: #8fa7c4;">Audio & Dashboard</div>
+            <button class="btn btn-secondary" style="font-size: 9px; padding: 2px 6px; margin-top: 4px;" onclick="castMemberToRobot('janvi.jpg', 'Janvi Bhatt', 'Audio & Dashboard')">Show on Robot</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Photo Gallery -->
+      <section class="card" style="margin-top: 10px; padding: 12px; background: #161b22; border-radius: 8px; border: 1px solid #30363d;">
+        <div class="card-header" style="margin-bottom: 8px;">
+          <h3 style="font-size: 13px;">📸 Recent Snapshots</h3>
+        </div>
+        <div id="photoGallery" style="display: flex; gap: 10px; overflow-x: auto; padding-bottom: 5px;">
+          <span style="color: #8fa7c4; font-size: 11px;">No snapshots yet.</span>
+        </div>
+      </section>
+
+    </div>
+
+    <!-- RIGHT COLUMN -->
+    <div class="dash-col dash-col-right">
+      
+      <section class="card card-chat" style="height: 100%; display: flex; flex-direction: column;">
+        <div class="card-header"><h3>JARVIS Voice Assistant</h3></div>
+
+        <ul class="chat-messages" id="dashboardChatMessages" style="flex: 1; overflow-y: auto; padding: 10px; background: rgba(0,0,0,0.2); border-radius: 8px; margin-bottom: 10px;">
+          <li class="response-empty" style="color: #8fa7c4; font-size: 12px;">Tap mic or type command below.</li>
+        </ul>
+
+        <div class="quick-command-chips chat-chips" style="display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 10px;">
+          <button class="chip" onclick="sendQuickChat('Hey Jarvis')">Hey Jarvis</button>
+          <button class="chip" onclick="sendQuickChat('Scan environment')">Scan</button>
+          <button class="chip" onclick="sendQuickChat('Who created you?')">Who made you?</button>
+          <button class="chip" onclick="sendQuickChat('तुम्हें किसने बनाया?')">किसने बनाया?</button>
+        </div>
+
+        <form class="chat-input-row" id="dashboardChatForm" onsubmit="event.preventDefault(); submitChat();" style="display: flex; gap: 8px; margin-bottom: 10px;">
+          <input type="text" id="dashboardChatInput" placeholder="Message Jarvis in English or Hindi..." autocomplete="off" style="flex: 1; padding: 10px 14px; border-radius: 20px; border: 1px solid #30363d; background: #0b1220; color: white;">
+          <button type="button" id="micBtn" class="mic-btn" onclick="toggleVoiceRecognition()" style="width: 40px; height: 40px; border-radius: 50%; background: #161b22; color: #58a6ff; border: 1px solid #30363d; cursor: pointer; font-size: 16px;">🎙️</button>
+          <button type="submit" class="chat-send-btn" style="width: 40px; height: 40px; border-radius: 50%; background: #00bfff; color: #05070d; border: none; cursor: pointer; font-weight: bold;">&#10148;</button>
+        </form>
+
+        <div class="lang-toggle-row" style="display: flex; gap: 10px;">
+          <button id="langEnBtn" class="lang-btn active" onclick="setLang('en')" style="flex: 1; padding: 8px; border-radius: 20px; font-size: 12px; cursor: pointer;">English</button>
+          <button id="langHiBtn" class="lang-btn" onclick="setLang('hi')" style="flex: 1; padding: 8px; border-radius: 20px; font-size: 12px; cursor: pointer;">हिंदी</button>
+        </div>
+      </section>
+
+    </div>
+
+  </div>
+</div>
+
+<script>
+  // FIX (auth header missing): API_AUTH_TOKEN (if you set one in .env) is
+  // rendered here by the server itself, from app.py's dashboard route --
+  // so it always matches your .env automatically. If you never set
+  // API_AUTH_TOKEN, this is just an empty string and every call below
+  // skips the header (matches the backend's no-op-if-unset behavior).
+  const API_TOKEN = "{{ api_token }}";
+
+  function authHeaders(extra = {}) {
+    const headers = { ...extra };
+    if (API_TOKEN) headers['X-API-Token'] = API_TOKEN;
+    return headers;
+  }
+
+  let isAutonomyActive = false;
+  let currentLanguage = 'en';
+  let previousRobotState = null;
+  let recognition = null;
+  let isListening = false;
+
+  // FIX (intermittent keyboard controls): the old version reacted to single
+  // keydown/keyup events only. Holding two keys together (e.g. W+D) and
+  // releasing just one sent 'stop' even though the other was still held --
+  // felt like keys randomly stopped working. Now we track the full set of
+  // currently-held keys and recompute the correct direction from that set.
+  // Also: each fetch is tagged with an increasing sequence number so an
+  // out-of-order network response (e.g. a 'stop' request that happens to
+  // arrive after a later 'forward' request) can never overwrite a more
+  // recent command.
+  const heldMovementKeys = new Set();
+  let moveRequestSeq = 0;
+  let lastSentDirection = null;
+
+  function moveRobot(dir) {
+    if (dir === lastSentDirection) return; // avoid spamming identical commands
+    lastSentDirection = dir;
+    const seq = ++moveRequestSeq;
+    fetch(`/api/move?dir=${dir}&duration=0`, { headers: authHeaders() })
+      .catch(() => {})
+      .finally(() => {
+        // If a newer command has already been sent by the time this
+        // request's response comes back, don't let this stale one
+        // "win" -- lastSentDirection has already moved on.
+        if (seq !== moveRequestSeq) return;
+      });
+  }
+
+  // Given everything currently held, decide the single direction to send.
+  // Supports true diagonals (W+D, W+A, S+D, S+A) in addition to the
+  // explicit Q/E diagonal keys, and correctly falls back to whichever
+  // key is still held when one of a combo is released.
+  function recomputeMovementFromHeldKeys() {
+    const has = (k) => heldMovementKeys.has(k);
+    let dir = 'stop';
+    if (has('KeyW') && has('KeyD')) dir = 'forward_right';
+    else if (has('KeyW') && has('KeyA')) dir = 'forward_left';
+    else if (has('KeyS') && has('KeyD')) dir = 'backward_right';
+    else if (has('KeyS') && has('KeyA')) dir = 'backward_left';
+    else if (has('KeyW')) dir = 'forward';
+    else if (has('KeyS')) dir = 'backward';
+    else if (has('KeyA')) dir = 'left';
+    else if (has('KeyD')) dir = 'right';
+    else if (has('KeyQ')) dir = 'forward_left';
+    else if (has('KeyE')) dir = 'forward_right';
+    moveRobot(dir);
+  }
+
+  document.querySelectorAll('.dpad-btn').forEach(btn => {
+    btn.addEventListener('mousedown', () => moveRobot(btn.dataset.direction));
+    btn.addEventListener('touchstart', (e) => { e.preventDefault(); moveRobot(btn.dataset.direction); });
+    btn.addEventListener('mouseup', () => moveRobot('stop'));
+    btn.addEventListener('touchend', (e) => { e.preventDefault(); moveRobot('stop'); });
+    btn.addEventListener('mouseleave', () => moveRobot('stop'));
+  });
+
+  const MOVEMENT_KEYS = ['KeyW', 'KeyS', 'KeyA', 'KeyD', 'KeyQ', 'KeyE'];
+
+  window.addEventListener('keydown', (e) => {
+    if (['input', 'textarea'].includes(document.activeElement.tagName.toLowerCase())) return;
+    if (e.code === 'Space') { e.preventDefault(); heldMovementKeys.clear(); moveRobot('stop'); return; }
+    if (MOVEMENT_KEYS.includes(e.code)) {
+      e.preventDefault();
+      if (!e.repeat) {
+        heldMovementKeys.add(e.code);
+        recomputeMovementFromHeldKeys();
+      }
+    }
+  });
+
+  window.addEventListener('keyup', (e) => {
+    if (['input', 'textarea'].includes(document.activeElement.tagName.toLowerCase())) return;
+    if (MOVEMENT_KEYS.includes(e.code)) {
+      heldMovementKeys.delete(e.code);
+      recomputeMovementFromHeldKeys(); // resumes whatever other key is still held, or stops if none
+    }
+  });
+
+  // Safety net: if the browser tab loses focus while a key is physically
+  // held (alt-tab, clicking another window), the keyup event never fires --
+  // the robot would otherwise keep driving forever. Stop on blur.
+  window.addEventListener('blur', () => {
+    heldMovementKeys.clear();
+    moveRobot('stop');
+  });
+    const host = window.location.host;
+    fetch(`/api/cast-team?server=${host}`).catch(() => {
+      fetch(`http://jarvis.local/team?server=${host}`).catch(() => {});
+    });
+
+
+  function castMemberToRobot(file, name, role) {
+    const host = window.location.host;
+    fetch(`/api/cast-member?server=${host}&file=${file}&name=${encodeURIComponent(name)}&role=${encodeURIComponent(role)}`).catch(() => {
+      fetch(`http://jarvis.local/show_member?server=${host}&file=${file}&name=${encodeURIComponent(name)}&role=${encodeURIComponent(role)}`).catch(() => {});
+    });
+  }
+
+  document.querySelectorAll('.dpad-btn').forEach(btn => {
+    btn.addEventListener('mousedown', () => moveRobot(btn.dataset.direction));
+    btn.addEventListener('touchstart', (e) => { e.preventDefault(); moveRobot(btn.dataset.direction); });
+    btn.addEventListener('mouseup', () => moveRobot('stop'));
+    btn.addEventListener('touchend', (e) => { e.preventDefault(); moveRobot('stop'); });
+    btn.addEventListener('mouseleave', () => moveRobot('stop'));
+  });
+
+  window.addEventListener('keydown', (e) => {
+    if (['input', 'textarea'].includes(document.activeElement.tagName.toLowerCase())) return;
+    const keyMap = {
+      'KeyW': 'forward', 'KeyS': 'backward', 'KeyA': 'left', 'KeyD': 'right',
+      'KeyQ': 'forward_left', 'KeyE': 'forward_right',
+      'Space': 'stop'
+    };
+    if (keyMap[e.code]) {
+      e.preventDefault();
+      moveRobot(keyMap[e.code]);
+    }
+  });
+
+  window.addEventListener('keyup', (e) => {
+    if (['input', 'textarea'].includes(document.activeElement.tagName.toLowerCase())) return;
+    if (['KeyW', 'KeyS', 'KeyA', 'KeyD', 'KeyQ', 'KeyE'].includes(e.code)) {
+      moveRobot('stop');
+    }
+  });
+
+  if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    recognition = new SpeechRecognition();
+    recognition.continuous = false;
+    recognition.interimResults = false;
+
+    recognition.onstart = () => {
+      isListening = true;
+      document.getElementById('micBtn').classList.add('listening');
+    };
+
+    recognition.onresult = (e) => {
+      // FIX: Guard against "undefined" phantom texts from the mic
+      if (e.results && e.results[0] && e.results[0][0]) {
+        const transcript = e.results[0][0].transcript;
+        if (transcript && transcript.trim() !== "undefined") {
+          document.getElementById('dashboardChatInput').value = transcript;
+          submitChat();
+        }
+      }
+    };
+
+    recognition.onerror = () => stopListening();
+    recognition.onend = () => stopListening();
+  }
+
+  function toggleVoiceRecognition() {
+    if (!recognition) {
+      alert("Speech recognition is not supported in this browser.");
+      return;
+    }
+    if (isListening) {
+      recognition.stop();
+    } else {
+      recognition.lang = currentLanguage === 'hi' ? 'hi-IN' : 'en-US';
+      try {
+        recognition.start();
+      } catch (err) {
+        alert("Microphone access blocked! If you are using a mobile phone, browsers require you to access this dashboard via HTTPS (or localhost) to use the mic. Consider using 'ngrok' to get a secure HTTPS link.");
+      }
+    }
+  }
+
+  function stopListening() {
+    isListening = false;
+    document.getElementById('micBtn').classList.remove('listening');
+  }
+
+  function updateVolume(val) {
+    document.getElementById('volLabel').innerText = val + "%";
+    fetch('/api/volume', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({volume_percent: parseInt(val)}) });
+  }
+
+  function toggleAutonomyState() {
+    isAutonomyActive = !isAutonomyActive;
+    const btn = document.getElementById('autonomyToggleBtn');
+    btn.innerText = isAutonomyActive ? 'Stop Autonomy' : 'Start Autonomy';
+    btn.style.backgroundColor = isAutonomyActive ? '#da3633' : '';
+    fetch('/api/control', { method: 'POST', headers: authHeaders({'Content-Type': 'application/json'}), body: JSON.stringify({command: isAutonomyActive ? 'autonomy_start' : 'autonomy_stop'}) });
+  }
+
+  function changeEyes(hex) {
+    fetch('/api/eyes', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({hex_color: hex}) });
+  }
+
+  function setLang(lang) {
+    currentLanguage = lang;
+    document.getElementById('langEnBtn').classList.toggle('active', lang === 'en');
+    document.getElementById('langHiBtn').classList.toggle('active', lang === 'hi');
+    fetch('/api/language', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({language: lang}) });
+  }
+
+  function sendQuickChat(text) {
+    document.getElementById('dashboardChatInput').value = text;
+    submitChat();
+  }
+
+  function submitChat() {
+    const input = document.getElementById('dashboardChatInput');
+    const msg = input.value.trim();
+    if (!msg) return;
+
+    const chatBox = document.getElementById('dashboardChatMessages');
+    chatBox.innerHTML += `<li style="margin-bottom:6px; color:white;"><b>You:</b> ${msg}</li>`;
+    input.value = '';
+    chatBox.scrollTop = chatBox.scrollHeight;
+
+    fetch('/api/chat', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({message: msg, language: currentLanguage})
+    }).then(r => r.json()).then(res => {
+      chatBox.innerHTML += `<li style="margin-bottom:6px; color:#58a6ff;"><b>Jarvis:</b> ${res.response}</li>`;
+      chatBox.scrollTop = chatBox.scrollHeight;
+    });
+  }
+
+  function takePhoto() {
+    fetch('/api/control', {
+      method: 'POST',
+      headers: authHeaders({'Content-Type': 'application/json'}),
+      body: JSON.stringify({command: 'screenshot'})
+    });
+    // Upload happens in a background thread server-side, so give it a
+    // couple seconds before refreshing the gallery, then poll once more
+    // shortly after in case the upload took a bit longer.
+    setTimeout(fetchPhotoGallery, 2500);
+    setTimeout(fetchPhotoGallery, 6000);
+  }
+
+  function fetchPhotoGallery() {
+    fetch('/api/snapshots').then(r => r.json()).then(data => {
+      const gallery = document.getElementById('photoGallery');
+      if (data.snapshots && data.snapshots.length > 0) {
+        gallery.innerHTML = data.snapshots.slice(0, 6).map(url => `
+          <div style="min-width: 120px; background: #0d1117; padding: 6px; border-radius: 6px; border: 1px solid #30363d;">
+            <img src="${url}" style="width: 100%; height: 90px; object-fit: cover; border-radius: 4px;" onclick="window.open('${url}', '_blank')" title="Click to open full size">
+          </div>
+        `).join('');
+      }
+    }).catch(() => {});
+  }
+
+  setInterval(() => {
+    fetch('/api/robot-status').then(r => r.json()).then(data => {
+      document.getElementById('batteryPercent').innerText = data.battery_percent + "%";
+      document.getElementById('batteryState').innerText = data.robot_online ? data.mode : "OFFLINE";
+      document.getElementById('batteryState').style.color = data.robot_online ? "#35e07a" : "#da3633";
+
+      if (data.robot_online === false && previousRobotState !== false) {
+        previousRobotState = false;
+        document.getElementById('robotOnlineAlert').style.display = 'block';
+        setTimeout(() => document.getElementById('robotOfflineAlert').style.display = 'none', 7000);
+      } else if (data.robot_online === true && previousRobotState !== true) {
+        previousRobotState = true;
+        document.getElementById('robotOfflineAlert').style.display = 'none';
+        document.getElementById('robotOnlineAlert').style.display = 'block';
+        setTimeout(() => document.getElementById('robotOnlineAlert').style.display = 'none', 5000);
+      }
+    }).catch(() => {});
+
+    fetch('/api/sensor-data').then(r => r.json()).then(data => {
+      if (data.ultrasonic_cm) document.getElementById('ultrasonicVal').innerText = data.ultrasonic_cm.front + " cm";
+    }).catch(() => {});
+
+    fetch('/api/activity-log').then(r => r.json()).then(logs => {
+      const logBox = document.getElementById('activityLogCompact');
+      if (logs && logs.length > 0) {
+        logBox.innerHTML = logs.slice(0, 4).map(l => `<li style="font-size: 11px; margin-bottom: 4px;"><span style="color:#8fa7c4;">[${l.timestamp.split('T')[1] || ''}]</span> ${l.event}</li>`).join('');
+      }
+    }).catch(() => {});
+  }, 2000);
+
+  fetchGallery();
+  fetchPhotoGallery();
+</script>
+
+{% endblock %}

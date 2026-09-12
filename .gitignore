@@ -6,10 +6,12 @@ env/
 # Python Cache
 __pycache__/
 *.pyc
+*.pyo
 
 # Large AI Models & Media
 *.pt
 *.onnx
+*.onnx.json
 *.bin
 resources/voices/
 
@@ -18,9 +20,46 @@ resources/voices/
 *.db
 memory/logs/
 
+# ChromaDB long-term memory store (regenerates at runtime, is per-machine
+# and can contain personal conversation data -- should never be committed)
+jarvis_brain_db/
+
+# JARVIS runtime state (per-machine settings, personal reminders --
+# should never be committed; ship jarvis_settings.example.json instead
+# if you want to document the shape)
+jarvis_settings.json
+jarvis_reminders.json
+
 # Secrets
 .env
 
-# Ignore temporary audio files
-temp_tts_*.wav
+# Temporary audio files
+# FIX: the previous patterns here ("temp_tts_*.wav" and "*.wav") never
+# actually matched the files the code generates -- jarvis_speak() in
+# app.py writes "temp_tts_<uuid>.mp3" (not .wav), and audio/tts.py's
+# GoogleSpeaker writes "tts_<uuid>.mp3". Neither pattern is .wav at all.
+# This is why dozens of temp_tts_*.mp3 / tts_*.mp3 / robot_mic_*.wav files
+# ended up committed to the repo (~55MB of them) despite this file
+# existing -- the patterns just didn't match the real filenames.
+# NOTE: adding a pattern here does NOT untrack files already committed.
+# Run this once after pulling this fix:
+#   git rm -r --cached temp_tts_*.mp3 tts_*.mp3 robot_mic_*.wav temp_stt_*.webm jarvis_brain_db
+#   git commit -m "Untrack generated runtime files"
+temp_audio/
+temp_tts_*.mp3
+tts_*.mp3
+robot_mic_*.wav
+temp_stt_*.webm
 *.wav
+*.mp3
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Backup/scratch files that shouldn't be tracked as source
+*backup*.txt
+*-backup*.txt
+final-backup.txt

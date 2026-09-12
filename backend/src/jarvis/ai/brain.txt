@@ -1,0 +1,495 @@
+import os
+import re
+import json
+import time
+import socket
+import cv2
+import requests
+import psutil
+from datetime import datetime
+from dotenv import load_dotenv
+from groq import Groq
+from google import genai
+from google.genai import types
+from ollama import Client as OllamaClient
+from jarvis.common.logger import setup_logger
+from jarvis.memory.local_db import LocalDatabase
+from jarvis.ai.memory import LongTermMemory
+from jarvis.storage.cloud_manager import CloudManager
+
+load_dotenv()
+logger = setup_logger()
+
+
+class JarvisBrain:
+    def __init__(self, vision_pipeline=None):
+        raw_esp_ip = os.getenv("ESP32_IP", "http://jarvis.local").strip().rstrip("/")
+        self.esp32_ip = raw_esp_ip if raw_esp_ip.startswith("http") else f"http://{raw_esp_ip}"
+
+        self.vision_pipeline = vision_pipeline
+        self.cloud = CloudManager()
+
+        # Primary Cloud Brain (Groq) Setup
+        self.groq_api_key = os.getenv("GROQ_API_KEY", "")
+        if not self.groq_api_key:
+            logger.warning("GROQ_API_KEY is missing from .env!")
+            
+        self.groq_client = Groq(api_key=self.groq_api_key)
+        
+        # Load Stable Fallback Models from .env
+        self.groq_model_primary = os.getenv("GROQ_MODEL_PRIMARY", "llama-3.1-8b-instant")
+        self.groq_model_secondary = os.getenv("GROQ_MODEL_SECONDARY", "gemma2-9b-it")
+
+        # Google Gemini API Setup (Updated to gemini-3.6-flash as required)
+        self.gemini_api_key = os.getenv("GEMINI_API_KEY", "")
+        if self.gemini_api_key:
+            self.gemini_client = genai.Client(api_key=self.gemini_api_key)
+        else:
+            self.gemini_client = None
+            logger.warning("GEMINI_API_KEY is missing from .env!")
+
+        # Tavily Search API Setup
+        self.tavily_api_key = os.getenv("TAVILY_API_KEY", "")
+
+        # Local Failover Brain (Ollama)
+        self.ollama_client = OllamaClient(host="http://127.0.0.1:11434", timeout=30.0)
+        self.local_model = os.getenv("OLLAMA_LOCAL_MODEL", "qwen2.5:3b")
+
+        # Long-term Memory Storage
+        self.db = LocalDatabase()
+        self.long_term_memory = LongTermMemory()
+        
+        # Tools Registry
+        self.tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_system_diagnostics",
+                    "description": "Get real-time host CPU usage, RAM utilization, and battery status.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "take_security_snapshot",
+                    "description": "Capture a live frame from ESP32-CAM and upload it to cloud storage.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "scan_environment",
+                    "description": "Ping the ultrasonic distance sensor to check for obstacle clearance.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "learn_new_person",
+                    "description": "Save and memorize a new person's face and their relationship to the user.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "description": "The person's name (e.g. John, Mr. Sharma)"},
+                            "relationship": {"type": "string", "description": "Their role or relationship (e.g. teacher, brother, friend)"}
+                        },
+                        "required": ["name"]
+                    },
+                },
+            }
+        ]
+
+        # Inject Tavily Web Search Tool if API key is provided
+        if self.tavily_api_key:
+            self.tools.append({
+                "type": "function",
+                "function": {
+                    "name": "search_the_web",
+                    "description": "Search the live internet using Tavily for recent news, current events, or up-to-date facts.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "The search query for live web retrieval"}
+                        },
+                        "required": ["query"]
+                    },
+                },
+            })
+
+        logger.info(f"JarvisBrain initialized with Memory, Gemini & Agent Tools. ESP32 IP: {self.esp32_ip}")
+
+    def set_esp32_emotion(self, emotion: str):
+        if not self.esp32_ip:
+            return
+        try:
+            requests.get(f"{self.esp32_ip}/emotion?type={emotion}", timeout=0.8)
+        except Exception:
+            pass
+
+    def execute_tool(self, function_name: str, arguments: dict) -> str:
+        logger.info(f"[AGENT TOOL] Executing: {function_name} with {arguments}")
+        
+        try:
+            if function_name == "get_system_diagnostics":
+                cpu = psutil.cpu_percent(interval=0.2)
+                ram = psutil.virtual_memory().percent
+                battery = psutil.sensors_battery()
+                batt = f"{battery.percent}%" if battery else "AC Power"
+                return json.dumps({"cpu_usage": f"{cpu}%", "ram_usage": f"{ram}%", "power_status": batt})
+
+            elif function_name == "take_security_snapshot":
+                if self.vision_pipeline:
+                    frame = self.vision_pipeline.get_latest_frame()
+                    if frame is not None:
+                        success, buffer = cv2.imencode('.jpg', frame)
+                        if success:
+                            cloud_url = self.cloud.upload_snapshot(buffer.tobytes())
+                            return json.dumps({"status": "success", "cloud_image_url": cloud_url})
+                return json.dumps({"error": "Camera frame unavailable."})
+
+            elif function_name == "scan_environment":
+                try:
+                    res = requests.get(f"{self.esp32_ip}/distance", timeout=1.5)
+                    if res.status_code == 200:
+                        dist = float(res.text)
+                        return json.dumps({"front_distance_cm": dist, "status": "Clear" if dist > 30 else "Blocked"})
+                except Exception as e:
+                    return json.dumps({"error": f"Sensor ping failed: {e}"})
+
+            elif function_name == "learn_new_person":
+                name = arguments.get("name", "").strip()
+                relationship = arguments.get("relationship", "Acquaintance / Colleague").strip()
+                
+                ignored_names = ["voice-to-text", "speech", "audio", "subtitle", "test", "likely", "null"]
+                if not name or any(ign in name.lower() for ign in ignored_names):
+                    return json.dumps({"status": "ignored", "error": "Invalid name detected."})
+
+                face_saved = False
+                msg = "No vision pipeline attached."
+                if self.vision_pipeline:
+                    face_saved, msg = self.vision_pipeline.learn_new_face(name)
+
+                fact = f"{name} is the user's {relationship}."
+                self.long_term_memory.remember(fact)
+                self.db.add_chat_message("system", f"Memorized: {fact}")
+                
+                self.set_esp32_emotion("happy")
+                return json.dumps({
+                    "status": "success",
+                    "person": name,
+                    "relationship": relationship,
+                    "face_memorized": face_saved,
+                    "detail": msg
+                })
+
+            elif function_name == "search_the_web":
+                query = arguments.get("query", "")
+                if not query or not self.tavily_api_key:
+                    return json.dumps({"error": "Tavily search unavailable or key missing."})
+                
+                try:
+                    logger.info(f"Querying Tavily API for: {query}")
+                    response = requests.post(
+                        "https://api.tavily.com/search",
+                        json={"api_key": self.tavily_api_key, "query": query, "max_results": 3},
+                        timeout=10
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                    results = data.get("results", [])
+                    
+                    if not results:
+                        return json.dumps({"error": "No live results found on Tavily."})
+                    
+                    search_data = "\n".join([f"- {res.get('title', '')}: {res.get('content', '')}" for res in results])
+                    return json.dumps({"status": "success", "live_data": search_data})
+                except Exception as e:
+                    return json.dumps({"error": f"Tavily search failed: {e}"})
+
+            return json.dumps({"error": f"Unknown tool: {function_name}"})
+                
+        except Exception as e:
+            logger.error(f"Tool failure: {e}")
+            return json.dumps({"error": str(e)})
+
+    def _check_direct_introduction(self, user_text: str) -> str | None:
+        if "voice-to-text" in user_text.lower() or "subtitles" in user_text.lower():
+            return None
+
+        pattern = r"(?:meet|this is)\s+my\s+([a-zA-Z\s]{2,15})\s+([A-Z][a-zA-Z0-9_-]{2,20})"
+        match = re.search(pattern, user_text, re.IGNORECASE)
+        if match:
+            role = match.group(1).strip()
+            name = match.group(2).strip()
+            
+            if name.lower() in ["voice-to-text", "audio", "test"]:
+                return None
+
+            res = self.execute_tool("learn_new_person", {"name": name, "relationship": role})
+            data = json.loads(res)
+            if data.get("status") == "success":
+                return f"Pleasure to meet you, {name}! I have committed you to memory as my commander's {role}."
+        return None
+
+    def _check_creator_query(self, user_text: str) -> tuple[bool, bool]:
+        lower = user_text.lower()
+        en_keywords = ["who made you", "who created you", "who built you", "team members", "your creators", "group 7", "group no 7", "who developed you"]
+        if any(kw in lower for kw in en_keywords): return True, False  
+
+        hi_keywords = ["किसने बनाया", "तुम्हें किसने बनाया", "निर्माता", "kisne banaya", "tumhe kisne banaya", "koun banaya"]
+        if any(kw in lower for kw in hi_keywords): return True, True  
+
+        return False, False
+
+    def _build_system_prompt(self, language_mode="en"):
+        current_time = datetime.now().strftime("%I:%M %p on %A, %B %d, %Y")
+        
+        lang = "Speak in fluent Hindi or Hinglish." if language_mode == "hi" else "Respond concisely in English."
+        return (
+            f"You are JARVIS, an autonomous AI robot built by Group No. 7 under the guidance of Prof. P. V. Gupta Ma'am. "
+            f"Your creators are: Meet Bhavsar (Project Lead & Firmware), Bhakti Nivgane (Hardware & Power), "
+            f"Shreya Shukla (AI Backend & Data), Dhara Thakkar (Computer Vision & Perception), "
+            f"and Janvi Bhatt (Wireless Audio & Dashboard). "
+            f"CRITICAL TEMPORAL DIRECTIVE: The exact current date and time on your host system is {current_time}. "
+            f"You are operating in the year 2026. Treat this timestamp as absolute reality. "
+            f"If you are asked for current facts, recent sports statistics, or live world events, YOU MUST USE THE 'search_the_web' TOOL. "
+            f"If stored memory context is provided below, ONLY mention it if it is directly relevant to the user's current question -- "
+            f"do not append unrelated remembered facts (like names, relationships, or notes) onto answers about unrelated topics. "
+            f"{lang} Keep responses natural, helpful, and concise (1-2 sentences)."
+        )
+
+    def diagnose(self) -> dict:
+        report = {"groq": {}, "gemini": {}, "ollama": {}}
+
+        if not self.groq_api_key:
+            report["groq"] = {"status": "error", "reason": "GROQ_API_KEY missing from .env"}
+        else:
+            try:
+                self.groq_client.chat.completions.create(
+                    messages=[{"role": "user", "content": "ping"}],
+                    model=self.groq_model_primary,
+                    max_tokens=5,
+                )
+                report["groq"] = {"status": "ok", "model": self.groq_model_primary}
+            except Exception as e:
+                report["groq"] = {"status": "error", "reason": str(e)}
+
+        if not self.gemini_api_key:
+            report["gemini"] = {"status": "error", "reason": "GEMINI_API_KEY missing from .env"}
+        else:
+            try:
+                self.gemini_client.models.generate_content(
+                    model='gemini-3.6-flash',
+                    contents='ping'
+                )
+                report["gemini"] = {"status": "ok", "model": "gemini-3.6-flash"}
+            except Exception as e:
+                report["gemini"] = {"status": "error", "reason": str(e)}
+
+        try:
+            listing = self.ollama_client.list()
+            models = [m.get("name", m.get("model", "")) for m in listing.get("models", [])]
+            if self.local_model not in models and not any(self.local_model in m for m in models):
+                report["ollama"] = {
+                    "status": "error",
+                    "reason": f"Ollama running but model '{self.local_model}' not pulled. Run: ollama pull {self.local_model}"
+                }
+            else:
+                report["ollama"] = {"status": "ok", "model": self.local_model}
+        except Exception as e:
+            report["ollama"] = {
+                "status": "error",
+                "reason": f"Ollama unreachable at 127.0.0.1:11434 — is 'ollama serve' running? ({e})"
+            }
+
+        return report
+
+    def think(self, user_input: str, language_mode: str = "en") -> str:
+        self.set_esp32_emotion("thinking")
+        logger.info(f"User input ({language_mode}): {user_input}")
+        self.db.add_chat_message("user", user_input)
+
+        is_creator, is_hindi = self._check_creator_query(user_input)
+        if is_creator:
+            if is_hindi or language_mode == "hi":
+                resp = "मुझे ग्रुप नंबर 7 ने प्रो. पी. वी. गुप्ता मैम के मार्गदर्शन में बनाया है!"
+            else:
+                resp = "I was engineered by Group No. 7 under the expert guidance of Prof. P. V. Gupta Ma'am."
+            
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.connect(('10.255.255.255', 1))
+                laptop_server_address = f"{s.getsockname()[0]}:8000"
+                s.close()
+            except Exception:
+                laptop_server_address = "127.0.0.1:8000"
+            try:
+                requests.get(f"{self.esp32_ip}/team?server={laptop_server_address}", timeout=1.0)
+            except Exception:
+                pass
+
+            self.set_esp32_emotion("happy")
+            self.db.add_chat_message("assistant", resp)
+            return resp
+
+        direct_intro_resp = self._check_direct_introduction(user_input)
+        if direct_intro_resp:
+            self.set_esp32_emotion("happy")
+            self.db.add_chat_message("assistant", direct_intro_resp)
+            return direct_intro_resp
+
+        # Check if the user is asking a vision/camera question
+        vision_keywords = ["what do you see", "look at", "what is in front", "scan the room", "describe the room", "camera"]
+        is_vision_query = any(kw in user_input.lower() for kw in vision_keywords)
+
+        if is_vision_query and self.vision_pipeline and self.gemini_client:
+            frame = self.vision_pipeline.get_latest_frame()
+            if frame is not None:
+                try:
+                    logger.info("Routing vision query directly to Google Gemini 3.6 Flash...")
+                    success, buffer = cv2.imencode('.jpg', frame)
+                    if success:
+                        image_bytes = buffer.tobytes()
+                        lang_instruction = "Respond natively in Hindi." if language_mode == "hi" else "Respond concisely in English."
+                        
+                        gemini_res = self.gemini_client.models.generate_content(
+                            model='gemini-3.6-flash',
+                            contents=[
+                                types.Part.from_bytes(data=image_bytes, mime_type='image/jpeg'),
+                                f"{self._build_system_prompt(language_mode)} {lang_instruction} User asks: {user_input}"
+                            ]
+                        )
+                        response_text = gemini_res.text.strip()
+                        if response_text:
+                            self.set_esp32_emotion("happy")
+                            self.db.add_chat_message("assistant", response_text)
+                            return response_text
+                except Exception as e:
+                    logger.warning(f"Gemini Vision call failed: {e}. Falling back to standard pipeline...")
+
+        visible_items = self.vision_pipeline.get_detected_labels() if self.vision_pipeline else []
+        vision_context = f"[Currently visible objects/people: {', '.join(visible_items)}]\n" if visible_items else ""
+        
+        past_context = self.long_term_memory.recall(user_input)
+        memory_injection = f"[Stored Memory context: {past_context}]\n" if past_context else ""
+
+        full_user_prompt = f"{vision_context}{memory_injection}{user_input}"
+        messages = [
+            {"role": "system", "content": self._build_system_prompt(language_mode)},
+            *[{"role": role, "content": content} for role, content in self.db.get_recent_chat_history(limit=3)],
+            {"role": "user", "content": full_user_prompt}
+        ]
+
+        response_text = ""
+        success = False
+
+        models_to_try = [self.groq_model_primary, self.groq_model_secondary]
+
+        for model in models_to_try:
+            try:
+                logger.info(f"Attempting Cloud API with model: {model}")
+                chat_completion = self.groq_client.chat.completions.create(
+                    messages=messages,
+                    model=model,
+                    tools=self.tools,
+                    tool_choice="auto",
+                    temperature=0.3,
+                    max_tokens=400,
+                )
+                msg = chat_completion.choices[0].message
+                
+                if hasattr(msg, "tool_calls") and msg.tool_calls:
+                    temp_messages = [dict(m) if isinstance(m, dict) else m for m in messages]
+                    temp_messages.append({
+                        "role": "assistant",
+                        "content": msg.content or "",
+                        "tool_calls": [
+                            {
+                                "id": tc.id,
+                                "type": tc.type,
+                                "function": {
+                                    "name": tc.function.name,
+                                    "arguments": tc.function.arguments
+                                }
+                            } for tc in msg.tool_calls
+                        ]
+                    })
+                    
+                    for tool_call in msg.tool_calls:
+                        try:
+                            args = json.loads(tool_call.function.arguments or "{}")
+                        except Exception:
+                            args = {}
+                        
+                        output = self.execute_tool(tool_call.function.name, args)
+                        temp_messages.append({
+                            "tool_call_id": tool_call.id,
+                            "role": "tool",
+                            "name": tool_call.function.name,
+                            "content": output,
+                        })
+
+                    final_res = self.groq_client.chat.completions.create(
+                        model=model,
+                        messages=temp_messages,
+                        temperature=0.3,
+                        max_tokens=250
+                    )
+                    response_text = final_res.choices[0].message.content
+                else:
+                    response_text = msg.content
+
+                if response_text:
+                    success = True
+                    break 
+            except Exception as e:
+                logger.warning(f"Groq Cloud Model [{model}] Failed: {e}. Trying next tier...")
+
+        if not success and self.gemini_client:
+            try:
+                logger.info("Groq Cloud offline. Triggering Google Gemini text fallback...")
+                prompt_text = "\n".join([f"{m['role']}: {m['content']}" for m in messages])
+                gemini_res = self.gemini_client.models.generate_content(
+                    model='gemini-3.6-flash',
+                    contents=prompt_text
+                )
+                response_text = gemini_res.text.strip()
+                if response_text:
+                    success = True
+            except Exception as e:
+                logger.warning(f"Gemini Text Fallback Failed: {e}")
+
+        if not success:
+            try:
+                logger.info(f"Cloud APIs Offline. Triggering Local Ollama Fallback ({self.local_model})...")
+                clean_messages = [
+                    {"role": m["role"], "content": m["content"]}
+                    for m in messages if isinstance(m, dict) and "content" in m and m.get("role") != "tool"
+                ]
+                res = self.ollama_client.chat(
+                    model=self.local_model,
+                    messages=clean_messages,
+                    options={"temperature": 0.3}
+                )
+                response_text = res['message']['content']
+                success = True
+            except Exception as e:
+                logger.error(f"Local Ollama Fallback Failed: {e}")
+                response_text = "माफ़ कीजिये, न्यूरल प्रोसेसर इस समय उपलब्ध नहीं है।" if language_mode == "hi" else "Neural processors are temporarily offline, sir."
+                self.set_esp32_emotion("confused")
+
+        if "</think>" in response_text:
+            response_text = response_text.split("</think>")[-1].strip()
+
+        lower_input = user_input.lower()
+        if any(w in lower_input for w in ["remember that", "take note", "याद रखना", "याद रखो"]):
+            self.long_term_memory.remember(user_input)
+
+        if success:
+            self.set_esp32_emotion("happy")
+
+        self.db.add_chat_message("assistant", response_text)
+        return response_text
